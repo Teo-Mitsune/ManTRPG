@@ -1,0 +1,755 @@
+import 'dotenv/config';
+import {
+  Client, GatewayIntentBits, Collection, Events,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle,
+  ChannelType, PermissionsBitField
+} from 'discord.js';
+import { fileURLToPath, pathToFileURL } from 'url';
+import { dirname, join } from 'path';
+import { readdirSync } from 'fs';
+import { DateTime } from 'luxon';
+import { startScheduler } from './scheduler.js';
+import {
+  loadEvents, saveEvents, ensureGuildBucket, makeId,
+  getGuildConfig
+} from './utils/storage.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const ZONE = 'Asia/Tokyo';
+
+// GuildMembers は不要運用（必要なら有効化）
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+// コマンド読み込み
+client.commands = new Collection();
+const commandsPath = join(__dirname, 'commands');
+for (const file of readdirSync(commandsPath)) {
+  if (!file.endsWith('.js')) continue;
+  const filePath = join(commandsPath, file);
+  const fileUrl = pathToFileURL(filePath).href;
+  const { command } = await import(fileUrl);
+  client.commands.set(command.data.name, command);
+}
+
+client.once(Events.ClientReady, (c) => {
+  console.log(`✅ Logged in as ${c.user.tag}`);
+  startScheduler(client); // 30秒おきに通知チェック
+});
+
+/* ----------------- helpers ----------------- */
+function formatJST(isoUtc) {
+  return isoUtc ? DateTime.fromISO(isoUtc).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') : null;
+}
+function safe(v, fallback = '未設定') {
+  return (v && String(v).trim().length) ? v : fallback;
+}
+function sortEventsForUI(list) {
+  const key = (e) => safe(formatJST(e.datetimeUTC), '9999-12-31 23:59');
+  return list.slice().sort((a, b) => (key(a) < key(b) ? -1 : 1));
+}
+function linesForEvent(ev) {
+  return [
+    `【日付】${formatJST(ev.datetimeUTC) ?? '未設定'}`,
+    `【シナリオ名】${safe(ev.scenarioName)}`,
+    `【システム名】${safe(ev.systemName)}`,
+    `【GM名】<@${ev.createdBy}>`
+  ];
+}
+function ensureParticipants(ev) {
+  if (!Array.isArray(ev.participants)) ev.participants = [];
+  return ev;
+}
+function slugifyName(name) {
+  return name
+    .toLowerCase()
+    .replace(/[\s　]+/g, '-')           
+    .replace(/[^\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}0-9a-z-_]/giu, '-') 
+    .replace(/-+/g, '-')                
+    .replace(/^-|-$/g, '')              
+    .slice(0, 90);                      
+}
+async function createPrivateChannelForScenario(interaction, scenarioName, createdByUserId, categoryId) {
+  const base = slugifyName(scenarioName) || 'scenario';
+  const parent = await interaction.guild.channels.fetch(categoryId).catch(() => null);
+  if (!parent || parent.type !== ChannelType.GuildCategory) {
+    throw new Error('カテゴリが無効です。/event config_setcategory で正しいカテゴリを設定してください。');
+  }
+
+  const siblings = parent.children?.cache ?? (await interaction.guild.channels.fetch()).filter(ch => ch.parentId === parent.id);
+  let name = base;
+  let i = 2;
+  while (siblings.find(ch => ch.name === name)) {
+    name = `${base}-${i++}`;
+  }
+
+  const everyone = interaction.guild.roles.everyone.id;
+  const botId = interaction.client.user.id;
+
+  const ch = await interaction.guild.channels.create({
+    name,
+    type: ChannelType.GuildText,
+    parent: parent.id,
+    permissionOverwrites: [
+      { id: everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
+      {
+        id: botId,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.ManageChannels
+        ]
+      },
+      {
+        id: createdByUserId,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.ReadMessageHistory,
+        ]
+      }
+    ]
+  });
+
+  await ch.send({
+    content: `🗓️ **シナリオ部屋**\nこのチャンネルは予定作成により自動生成されました。\n作成者: <@${createdByUserId}>\nシナリオ名: **${scenarioName}**`
+  });
+
+  return ch.id;
+}
+async function grantAccessToPrivateChannel(guild, channelId, userId) {
+  try {
+    const ch = await guild.channels.fetch(channelId);
+    if (!ch?.isTextBased()) return;
+    await ch.permissionOverwrites.edit(userId, {
+      ViewChannel: true,
+      SendMessages: true,
+      ReadMessageHistory: true
+    });
+  } catch (e) {
+    console.error('grantAccess error:', e);
+  }
+}
+async function revokeAccessFromPrivateChannel(guild, channelId, userId) {
+  try {
+    const ch = await guild.channels.fetch(channelId);
+    if (!ch?.isTextBased()) return;
+    await ch.permissionOverwrites.delete(userId).catch(() => {});
+  } catch (e) {
+    console.error('revokeAccess error:', e);
+  }
+}
+
+/* ----------------- interactions ----------------- */
+client.on(Events.InteractionCreate, async (interaction) => {
+  // Slash Command
+  if (interaction.isChatInputCommand()) {
+    const cmd = client.commands.get(interaction.commandName);
+    if (!cmd) return;
+
+    // /event ui → GUIパネル
+    if (interaction.commandName === 'event' && interaction.options.getSubcommand(false) === 'ui') {
+      const row1 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('evui_add').setLabel('予定を追加').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('evui_list').setLabel('予定一覧').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('evui_edit').setLabel('予定を編集').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('evui_remove').setLabel('予定を削除').setStyle(ButtonStyle.Danger),
+      );
+      const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('evui_join').setLabel('参加する').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('evui_unjoin').setLabel('参加取消').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('evui_viewmembers').setLabel('参加者を見る').setStyle(ButtonStyle.Secondary),
+      );
+      await interaction.reply({ content: '📋 **予定パネル**', components: [row1, row2], ephemeral: true });
+      return;
+    }
+
+    try {
+      await cmd.execute(interaction);
+    } catch (err) {
+      console.error(err);
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true });
+      } else {
+        await interaction.reply({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true });
+      }
+    }
+    return;
+  }
+
+  // Buttons
+  if (interaction.isButton()) {
+    const id = interaction.customId;
+
+    // 追加 → モーダル（シナリオ名は必須）
+    if (id === 'evui_add') {
+      const cfg = getGuildConfig(interaction.guildId);
+      if (!cfg?.logChannelId) {
+        await interaction.reply({ content: '⛔ 先に `/event config_setlogchannel` で「予定管理チャンネル」を設定してください。', ephemeral: true });
+        return;
+      }
+      if (!cfg?.eventCategoryId) {
+        await interaction.reply({ content: '⛔ 先に `/event config_setcategory` で「シナリオ用カテゴリ」を設定してください。', ephemeral: true });
+        return;
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId('evui_add_modal')
+        .setTitle('予定を追加（JST）');
+
+      const dateTime = new TextInputBuilder()
+        .setCustomId('evui_dt')
+        .setLabel('【日付】yyyy-MM-dd HH:mm（空でもOK）')
+        .setPlaceholder('例: 2025-11-06 19:00')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false);
+
+      const scenario = new TextInputBuilder()
+        .setCustomId('evui_scenario')
+        .setLabel('【シナリオ名】（必須）')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const system = new TextInputBuilder()
+        .setCustomId('evui_system')
+        .setLabel('【システム名】（空でもOK）')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(dateTime),
+        new ActionRowBuilder().addComponents(scenario),
+        new ActionRowBuilder().addComponents(system),
+      );
+
+      await interaction.showModal(modal);
+      return;
+    }
+
+    // 一覧
+    if (id === 'evui_list') {
+      const events = loadEvents();
+      const list = sortEventsForUI(events[interaction.guildId] ?? []);
+      const me = interaction.user.id;
+
+      if (list.length === 0) {
+        await interaction.reply({ content: '（予定はありません）', ephemeral: true });
+        return;
+      }
+
+      const lines = list.slice(0, 20).map(e => {
+        ensureParticipants(e);
+        const whenTxt = formatJST(e.datetimeUTC) ?? '未設定';
+        const joined = e.participants.includes(me);
+        const isCreator = e.createdBy === me;
+
+        let info = '';
+        if (joined) {
+          info = ` / 参加者:${e.participants.length}人 / 参加済`;
+        } else if (isCreator) {
+          info = ` / 参加者:${e.participants.length}人 / （作成者）`;
+        } else {
+          info = ' / 参加者:非公開';
+        }
+
+        return `• ${whenTxt} / ${safe(e.scenarioName)} / ${safe(e.systemName)}${info} | id:\`${e.id}\`${e.notified ? ' (通知済)' : ''}`;
+      });
+
+      await interaction.reply({ content: lines.join('\n'), ephemeral: true });
+      return;
+    }
+
+    // 編集
+    if (id === 'evui_edit') {
+      const events = loadEvents();
+      const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
+
+      if (list.length === 0) {
+        await interaction.reply({ content: '（編集できる予定がありません）', ephemeral: true });
+        return;
+      }
+
+      const options = list.map(e => {
+        const when = formatJST(e.datetimeUTC) ?? '未設定';
+        const label = `${when} ${safe(e.scenarioName)}`.slice(0, 100);
+        return { label, value: e.id, description: `${safe(e.systemName)}`.slice(0, 100) };
+      });
+
+      const select = new StringSelectMenuBuilder()
+        .setCustomId('evui_edit_select')
+        .setPlaceholder('編集する予定を選択')
+        .addOptions(options);
+
+      const row = new ActionRowBuilder().addComponents(select);
+      await interaction.reply({ content: '✏️ 編集対象を選んでください', components: [row], ephemeral: true });
+      return;
+    }
+
+    // 削除
+    if (id === 'evui_remove') {
+      const events = loadEvents();
+      const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
+
+      if (list.length === 0) {
+        await interaction.reply({ content: '（削除できる予定がありません）', ephemeral: true });
+        return;
+      }
+
+      const options = list.map(e => {
+        const label = `${(formatJST(e.datetimeUTC) ?? '未設定')} ${safe(e.scenarioName)}`.slice(0, 100);
+        return { label, value: e.id, description: `${safe(e.systemName)}`.slice(0, 100) };
+      });
+
+      const select = new StringSelectMenuBuilder()
+        .setCustomId('evui_remove_select')
+        .setPlaceholder('削除する予定を選択')
+        .addOptions(options);
+
+      const row = new ActionRowBuilder().addComponents(select);
+      await interaction.reply({ content: '🗑️ 削除対象を選んでください', components: [row], ephemeral: true });
+      return;
+    }
+
+    // 参加
+    if (id === 'evui_join') {
+      const events = loadEvents();
+      const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
+
+      if (list.length === 0) {
+        await interaction.reply({ content: '（参加できる予定がありません）', ephemeral: true });
+        return;
+      }
+
+      const options = list.map(e => {
+        ensureParticipants(e);
+        const when = formatJST(e.datetimeUTC) ?? '未設定';
+        const label = `${when} ${safe(e.scenarioName)}`.slice(0, 100);
+        const desc = `${safe(e.systemName)}`.slice(0, 100);
+        return { label, value: e.id, description: desc };
+      });
+
+      const select = new StringSelectMenuBuilder()
+        .setCustomId('evui_join_select')
+        .setPlaceholder('参加する予定を選択')
+        .addOptions(options);
+
+      const row = new ActionRowBuilder().addComponents(select);
+      await interaction.reply({ content: '🙋 参加する予定を選んでください', components: [row], ephemeral: true });
+      return;
+    }
+
+    // 参加取消
+    if (id === 'evui_unjoin') {
+      const me = interaction.user.id;
+      const events = loadEvents();
+      const listAll = sortEventsForUI(events[interaction.guildId] ?? []);
+      const list = listAll.filter(e => ensureParticipants(e).participants.includes(me)).slice(0, 25);
+
+      if (list.length === 0) {
+        await interaction.reply({ content: '（参加中の予定はありません）', ephemeral: true });
+        return;
+      }
+
+      const options = list.map(e => {
+        const when = formatJST(e.datetimeUTC) ?? '未設定';
+        const label = `${when} ${safe(e.scenarioName)}`.slice(0, 100);
+        const desc = `${safe(e.systemName)}`.slice(0, 100);
+        return { label, value: e.id, description: desc };
+      });
+
+      const select = new StringSelectMenuBuilder()
+        .setCustomId('evui_unjoin_select')
+        .setPlaceholder('参加を取り消す予定を選択')
+        .addOptions(options);
+
+      const row = new ActionRowBuilder().addComponents(select);
+      await interaction.reply({ content: '↩️ 参加を取り消す予定を選んでください', components: [row], ephemeral: true });
+      return;
+    }
+
+    // 参加者を見る
+    if (id === 'evui_viewmembers') {
+      const events = loadEvents();
+      const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
+
+      if (list.length === 0) {
+        await interaction.reply({ content: '（予定はありません）', ephemeral: true });
+        return;
+      }
+
+      const options = list.map(e => {
+        ensureParticipants(e);
+        const when = formatJST(e.datetimeUTC) ?? '未設定';
+        const label = `${when} ${safe(e.scenarioName)}`.slice(0, 100);
+        const desc = `${safe(e.systemName)}`.slice(0, 100);
+        return { label, value: e.id, description: desc };
+      });
+
+      const select = new StringSelectMenuBuilder()
+        .setCustomId('evui_viewmembers_select')
+        .setPlaceholder('参加者を確認する予定を選択')
+        .addOptions(options);
+
+      const row = new ActionRowBuilder().addComponents(select);
+      await interaction.reply({ content: '👀 参加者を確認する予定を選んでください（未参加者は人数・名前ともに非公開／作成者は人数のみ常時閲覧可）', components: [row], ephemeral: true });
+      return;
+    }
+
+    return;
+  }
+
+  // Select Menu（確定ステップ）
+  if (interaction.isStringSelectMenu()) {
+    // 編集
+    if (interaction.customId === 'evui_edit_select') {
+      const id = interaction.values[0];
+      const events = loadEvents();
+      const arr = events[interaction.guildId] ?? [];
+      const ev = arr.find(e => e.id === id);
+      if (!ev) {
+        await interaction.reply({ content: '⛔ 選択した予定が見つかりません。', ephemeral: true });
+        return;
+      }
+
+      const currentDt = formatJST(ev.datetimeUTC) ?? '';
+      const currentScenario = ev.scenarioName ?? '';
+      const currentSystem = ev.systemName ?? '';
+
+      const modal = new ModalBuilder()
+        .setCustomId(`evui_edit_modal:${id}`)
+        .setTitle('予定を編集（空でクリア可／シナリオ名空は不可）');
+
+      const dateTime = new TextInputBuilder()
+        .setCustomId('evui_dt')
+        .setLabel('【日付】yyyy-MM-dd HH:mm（空でクリア）')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setValue(currentDt);
+
+      const scenario = new TextInputBuilder()
+        .setCustomId('evui_scenario')
+        .setLabel('【シナリオ名】（空不可）')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setValue(currentScenario);
+
+      const system = new TextInputBuilder()
+        .setCustomId('evui_system')
+        .setLabel('【システム名】（空でクリア）')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setValue(currentSystem);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(dateTime),
+        new ActionRowBuilder().addComponents(scenario),
+        new ActionRowBuilder().addComponents(system),
+      );
+
+      await interaction.showModal(modal);
+      return;
+    }
+
+    // 削除
+    if (interaction.customId === 'evui_remove_select') {
+      const id = interaction.values[0];
+      const events = loadEvents();
+      const arr = events[interaction.guildId] ?? [];
+      const idx = arr.findIndex(e => e.id === id);
+      if (idx === -1) {
+        await interaction.reply({ content: '⛔ 選択した予定が見つかりません。', ephemeral: true });
+        return;
+      }
+      const [removed] = arr.splice(idx, 1);
+      events[interaction.guildId] = arr;
+      saveEvents(events);
+
+      await interaction.reply({
+        content: `🗑️ 削除しました：\n${linesForEvent(removed).join('\n')}\nID:\`${removed.id}\``,
+        ephemeral: true
+      });
+      return;
+    }
+
+    // 参加確定
+    if (interaction.customId === 'evui_join_select') {
+      const id = interaction.values[0];
+      const me = interaction.user.id;
+      const events = loadEvents();
+      const arr = events[interaction.guildId] ?? [];
+      const ev = arr.find(e => e.id === id);
+      if (!ev) {
+        await interaction.reply({ content: '⛔ 選択した予定が見つかりません。', ephemeral: true });
+        return;
+      }
+      ensureParticipants(ev);
+      if (!ev.participants.includes(me)) ev.participants.push(me);
+      saveEvents(events);
+
+      if (ev.privateChannelId) {
+        await grantAccessToPrivateChannel(interaction.guild, ev.privateChannelId, me);
+        // ★ 参加通知をプライベートチャンネルへ投稿（追加点）
+        try {
+          const ch = await interaction.guild.channels.fetch(ev.privateChannelId);
+          if (ch?.isTextBased()) {
+            await ch.send({
+              content: `✅ <@${me}> さんが**参加しました**（シナリオ: **${safe(ev.scenarioName)}**）`
+            });
+          }
+        } catch (e) {
+          console.error('join log post error:', e);
+        }
+      }
+
+      await interaction.reply({
+        content: `🙋 参加を登録しました。\n${linesForEvent(ev).join('\n')}\n現在の参加者数: **${ev.participants.length}人**（参加者名はあなたのみ閲覧可）\nID:\`${ev.id}\``,
+        ephemeral: true
+      });
+      return;
+    }
+
+    // 参加取消確定
+    if (interaction.customId === 'evui_unjoin_select') {
+      const id = interaction.values[0];
+      const me = interaction.user.id;
+      const events = loadEvents();
+      const arr = events[interaction.guildId] ?? [];
+      const ev = arr.find(e => e.id === id);
+      if (!ev) {
+        await interaction.reply({ content: '⛔ 選択した予定が見つかりません。', ephemeral: true });
+        return;
+      }
+      ensureParticipants(ev);
+      ev.participants = ev.participants.filter(u => u !== me);
+      saveEvents(events);
+
+      if (ev.privateChannelId && ev.createdBy !== me) {
+        await revokeAccessFromPrivateChannel(interaction.guild, ev.privateChannelId, me);
+      }
+
+      await interaction.reply({
+        content: `↩️ 参加を取り消しました。\n${linesForEvent(ev).join('\n')}\n現在の参加者数: **${ev.participants.length}人**\nID:\`${ev.id}\``,
+        ephemeral: true
+      });
+      return;
+    }
+
+    // 参加者を見る
+    if (interaction.customId === 'evui_viewmembers_select') {
+      const id = interaction.values[0];
+      const me = interaction.user.id;
+      const events = loadEvents();
+      const arr = events[interaction.guildId] ?? [];
+      const ev = arr.find(e => e.id === id);
+      if (!ev) {
+        await interaction.reply({ content: '⛔ 選択した予定が見つかりません。', ephemeral: true });
+        return;
+      }
+      ensureParticipants(ev);
+
+      const isCreator = ev.createdBy === me;
+      const joined = ev.participants.includes(me);
+
+      if (!joined) {
+        if (isCreator) {
+          await interaction.reply({
+            content: `👀 参加者数: **${ev.participants.length}人**\n（参加者の**名前**は、参加登録後に閲覧できます）\n\n${linesForEvent(ev).join('\n')}\nID:\`${ev.id}\``,
+            ephemeral: true
+          });
+        } else {
+          await interaction.reply({
+            content: `👀 参加者情報は**参加登録後**に閲覧できます。\n\n${linesForEvent(ev).join('\n')}\nID:\`${ev.id}\``,
+            ephemeral: true
+          });
+        }
+        return;
+      }
+
+      const names = await Promise.all(
+        ev.participants.map(async (uid) => {
+          try {
+            const member = await interaction.guild.members.fetch(uid);
+            return `• ${member.user.tag} (<@${uid}>)`;
+          } catch {
+            return `• <@${uid}>`;
+          }
+        })
+      );
+
+      await interaction.reply({
+        content: `👥 参加者（${ev.participants.length}人）\n${names.join('\n')}\n\n${linesForEvent(ev).join('\n')}\nID:\`${ev.id}\``,
+        ephemeral: true
+      });
+      return;
+    }
+  }
+
+  // Modal submit（追加/編集）
+  if (interaction.isModalSubmit()) {
+    // 追加
+    if (interaction.customId === 'evui_add_modal') {
+      const dtStr = interaction.fields.getTextInputValue('evui_dt').trim();
+      const scenarioName = interaction.fields.getTextInputValue('evui_scenario').trim();
+      const systemName = interaction.fields.getTextInputValue('evui_system').trim();
+
+      const cfg = getGuildConfig(interaction.guildId);
+      if (!cfg?.logChannelId || !cfg?.eventCategoryId) {
+        await interaction.reply({ content: '⛔ 先に `/event config_setlogchannel` と `/event config_setcategory` を設定してください。', ephemeral: true });
+        return;
+      }
+      if (!scenarioName.length) {
+        await interaction.reply({ content: '⛔ シナリオ名は必須です。', ephemeral: true });
+        return;
+      }
+
+      let datetimeUTC = null;
+      if (dtStr.length) {
+        const dt = DateTime.fromFormat(dtStr, 'yyyy-MM-dd HH:mm', { zone: ZONE });
+        if (!dt.isValid) {
+          await interaction.reply({ content: '⛔ 日付の形式が不正です。`yyyy-MM-dd HH:mm` で入力してください。', ephemeral: true });
+          return;
+        }
+        if (dt < DateTime.now().setZone(ZONE)) {
+          await interaction.reply({ content: '⛔ 過去の日時は登録できません。', ephemeral: true });
+          return;
+        }
+        datetimeUTC = dt.toUTC().toISO();
+      }
+
+      const events = loadEvents();
+      ensureGuildBucket(events, interaction.guildId);
+
+      const id = makeId();
+      const event = {
+        id,
+        datetimeUTC,
+        scenarioName,
+        systemName: systemName || null,
+        createdBy: interaction.user.id,
+        participants: [],
+        notified: false,
+        privateChannelId: null
+      };
+
+      // プライベートチャンネル作成
+      let createdChannelId = null;
+      try {
+        createdChannelId = await createPrivateChannelForScenario(
+          interaction,
+          scenarioName,
+          interaction.user.id,
+          cfg.eventCategoryId
+        );
+        event.privateChannelId = createdChannelId;
+      } catch (e) {
+        console.error('シナリオch作成失敗:', e);
+        await interaction.reply({ content: `⛔ シナリオ用チャンネルの作成に失敗しました：${String(e?.message ?? e)}`, ephemeral: true });
+        return;
+      }
+
+      events[interaction.guildId].push(event);
+      saveEvents(events);
+
+      // 作成者にはエフェメラルでチャンネルを案内（便利）
+      await interaction.reply({
+        content: `✅ 予定を追加しました。\n${linesForEvent(event).join('\n')}\nシナリオ用チャンネル: <#${createdChannelId}>\nID:\`${id}\``,
+        ephemeral: true
+      });
+
+      // 🔔 管理チャンネルへの通知（※チャンネルは表示しない）
+      try {
+        const channel = await interaction.client.channels.fetch(cfg.logChannelId);
+        await channel.send({
+          content: [
+            `🗓️ **予定追加** by <@${interaction.user.id}>`,
+            ...linesForEvent(event),
+            // ← チャンネルは通知に表示しない要求により非表示
+            `ID:\`${id}\``
+          ].join('\n')
+        });
+      } catch (e) {
+        console.error('ログ投稿エラー:', e);
+      }
+      return;
+    }
+
+    // 編集
+    if (interaction.customId.startsWith('evui_edit_modal:')) {
+      const id = interaction.customId.split(':')[1];
+      const dtStr = interaction.fields.getTextInputValue('evui_dt').trim();
+      const scenarioName = interaction.fields.getTextInputValue('evui_scenario').trim();
+      const systemName = interaction.fields.getTextInputValue('evui_system').trim();
+
+      const events = loadEvents();
+      const arr = events[interaction.guildId] ?? [];
+      const ev = arr.find(e => e.id === id);
+      if (!ev) {
+        await interaction.reply({ content: '⛔ 対象の予定が見つかりません。', ephemeral: true });
+        return;
+      }
+      ensureParticipants(ev);
+
+      if (!scenarioName.length) {
+        await interaction.reply({ content: '⛔ シナリオ名は空にできません。', ephemeral: true });
+        return;
+      }
+
+      const before = { ...ev };
+
+      if (dtStr.length === 0) {
+        ev.datetimeUTC = null;
+        ev.notified = false;
+      } else {
+        const dt = DateTime.fromFormat(dtStr, 'yyyy-MM-dd HH:mm', { zone: ZONE });
+        if (!dt.isValid) {
+          await interaction.reply({ content: '⛔ 日付の形式が不正です。`yyyy-MM-dd HH:mm` で入力してください。', ephemeral: true });
+          return;
+        }
+        if (dt < DateTime.now().setZone(ZONE)) {
+          await interaction.reply({ content: '⛔ 過去の日時には変更できません。', ephemeral: true });
+          return;
+        }
+        ev.datetimeUTC = dt.toUTC().toISO();
+        ev.notified = false;
+      }
+
+      ev.scenarioName = scenarioName;
+      ev.systemName = systemName.length ? systemName : null;
+
+      saveEvents(events);
+
+      const beforeLines = linesForEvent(before).join('\n');
+      const afterLines = linesForEvent(ev).join('\n');
+
+      await interaction.reply({
+        content: `✏️ 変更しました。\n**Before**\n${beforeLines}\n\n**After**\n${afterLines}\n※ シナリオ用チャンネル名は自動では変更しません（必要なら手動で変更可）\nID:\`${id}\``,
+        ephemeral: true
+      });
+
+      // 🔔 管理チャンネルへの通知（チャンネルは表示しない）
+      try {
+        const cfg = getGuildConfig(interaction.guildId);
+        if (cfg?.logChannelId) {
+          const channel = await interaction.client.channels.fetch(cfg.logChannelId);
+          await channel.send({
+            content: [
+              `✏️ **予定変更** by <@${interaction.user.id}>`,
+              `**Before**`,
+              beforeLines,
+              `**After**`,
+              afterLines,
+              `ID:\`${id}\``
+            ].join('\n')
+          });
+        }
+      } catch (e) {
+        console.error('ログ投稿エラー:', e);
+      }
+      return;
+    }
+  }
+});
+
+client.login(process.env.DISCORD_TOKEN);

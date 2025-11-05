@@ -1,0 +1,19 @@
+{
+    "name": "ManTRPG",
+    "version": "0.2.0",
+    "private": true,
+    "type": "module",
+    "engines": {
+        "node": ">=20"
+    },
+    "scripts": {
+        "dev": "node src/index.js",
+        "deploy:cmd": "node scripts/deploy-commands.js",
+        "start": "node src/index.js"
+    },
+    "dependencies": {
+        "discord.js": "^14.16.0",
+        "dotenv": "^16.4.5",
+        "luxon": "^3.7.2"
+    }
+}
