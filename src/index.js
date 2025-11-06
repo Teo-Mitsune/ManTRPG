@@ -19,11 +19,34 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ZONE = 'Asia/Tokyo';
 
+
+
+
+// GuildMembers は不要運用（必要なら有効化）
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
 client.on('debug', (m) => console.log('[debug]', m));
 client.on('warn', (m) => console.warn('[warn]', m));
 client.on('error', (e) => console.error('[error]', e));
 process.on('unhandledRejection', (r) => console.error('[unhandledRejection]', r));
 process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
+
+
+// コマンド読み込み
+client.commands = new Collection();
+const commandsPath = join(__dirname, 'commands');
+for (const file of readdirSync(commandsPath)) {
+  if (!file.endsWith('.js')) continue;
+  const filePath = join(commandsPath, file);
+  const fileUrl = pathToFileURL(filePath).href;
+  const { command } = await import(fileUrl);
+  client.commands.set(command.data.name, command);
+}
+
+client.once(Events.ClientReady, (c) => {
+  console.log(`✅ Logged in as ${c.user.tag}`);
+  startScheduler(client); // 30秒おきに通知チェック
+});
 
 async function safeAck(interaction, ephemeral = true) {
   if (interaction.deferred || interaction.replied) return;
@@ -43,25 +66,6 @@ async function safeEdit(interaction, payload) {
     console.error('[safeEdit]', e);
   }
 }
-
-// GuildMembers は不要運用（必要なら有効化）
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
-// コマンド読み込み
-client.commands = new Collection();
-const commandsPath = join(__dirname, 'commands');
-for (const file of readdirSync(commandsPath)) {
-  if (!file.endsWith('.js')) continue;
-  const filePath = join(commandsPath, file);
-  const fileUrl = pathToFileURL(filePath).href;
-  const { command } = await import(fileUrl);
-  client.commands.set(command.data.name, command);
-}
-
-client.once(Events.ClientReady, (c) => {
-  console.log(`✅ Logged in as ${c.user.tag}`);
-  startScheduler(client); // 30秒おきに通知チェック
-});
 
 /* ----------------- helpers ----------------- */
 function formatJST(isoUtc) {
