@@ -149,7 +149,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const cmd = client.commands.get(interaction.commandName);
     if (!cmd) return;
 
-    // /event ui → GUIパネル
+    // /event ui → GUIパネル（即時返信でOK）
     if (interaction.commandName === 'event' && interaction.options.getSubcommand(false) === 'ui') {
       const row1 = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('evui_add').setLabel('予定を追加').setStyle(ButtonStyle.Primary),
@@ -170,10 +170,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await cmd.execute(interaction);
     } catch (err) {
       console.error(err);
-      if (interaction.replied || interaction.deferred) {
-        await interaction.followUp({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true });
+      // 既にACK済みなら followUp、未ACKなら reply。どちらも失敗しても落とさない。
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true }).catch(() => {});
       } else {
-        await interaction.reply({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true });
+        await interaction.reply({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true }).catch(() => {});
       }
     }
     return;
@@ -228,7 +229,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // 一覧
+    // 一覧（軽いので即時返信）
     if (id === 'evui_list') {
       const events = loadEvents();
       const list = sortEventsForUI(events[interaction.guildId] ?? []);
@@ -261,7 +262,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // 編集
+    // 編集（軽い）
     if (id === 'evui_edit') {
       const events = loadEvents();
       const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
@@ -287,7 +288,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // 削除
+    // 削除（軽い）
     if (id === 'evui_remove') {
       const events = loadEvents();
       const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
@@ -312,7 +313,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // 参加
+    // 参加（軽い）
     if (id === 'evui_join') {
       const events = loadEvents();
       const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
@@ -340,7 +341,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // 参加取消
+    // 参加取消（軽い）
     if (id === 'evui_unjoin') {
       const me = interaction.user.id;
       const events = loadEvents();
@@ -369,7 +370,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // 参加者を見る
+    // 参加者を見る（軽い）
     if (id === 'evui_viewmembers') {
       const events = loadEvents();
       const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
@@ -454,34 +455,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // 削除
     if (interaction.customId === 'evui_remove_select') {
+      await interaction.deferReply({ ephemeral: true });
       const id = interaction.values[0];
       const events = loadEvents();
       const arr = events[interaction.guildId] ?? [];
       const idx = arr.findIndex(e => e.id === id);
       if (idx === -1) {
-        await interaction.reply({ content: '⛔ 選択した予定が見つかりません。', ephemeral: true });
+        await interaction.editReply({ content: '⛔ 選択した予定が見つかりません。' });
         return;
       }
       const [removed] = arr.splice(idx, 1);
       events[interaction.guildId] = arr;
       saveEvents(events);
 
-      await interaction.reply({
-        content: `🗑️ 削除しました：\n${linesForEvent(removed).join('\n')}\nID:\`${removed.id}\``,
-        ephemeral: true
+      await interaction.editReply({
+        content: `🗑️ 削除しました：\n${linesForEvent(removed).join('\n')}\nID:\`${removed.id}\``
       });
       return;
     }
 
     // 参加確定
     if (interaction.customId === 'evui_join_select') {
+      await interaction.deferReply({ ephemeral: true });
       const id = interaction.values[0];
       const me = interaction.user.id;
       const events = loadEvents();
       const arr = events[interaction.guildId] ?? [];
       const ev = arr.find(e => e.id === id);
       if (!ev) {
-        await interaction.reply({ content: '⛔ 選択した予定が見つかりません。', ephemeral: true });
+        await interaction.editReply({ content: '⛔ 選択した予定が見つかりません。' });
         return;
       }
       ensureParticipants(ev);
@@ -490,35 +492,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (ev.privateChannelId) {
         await grantAccessToPrivateChannel(interaction.guild, ev.privateChannelId, me);
-        // ★ 参加通知をプライベートチャンネルへ投稿（追加点）
+        // 参加ログをシナリオ用chにも投稿
         try {
           const ch = await interaction.guild.channels.fetch(ev.privateChannelId);
-          if (ch?.isTextBased()) {
-            await ch.send({
-              content: `✅ <@${me}> さんが**参加しました**（シナリオ: **${safe(ev.scenarioName)}**）`
-            });
-          }
-        } catch (e) {
-          console.error('join log post error:', e);
-        }
+          await ch?.send(`🙋 <@${me}> さんが参加しました。`);
+        } catch {}
       }
 
-      await interaction.reply({
-        content: `🙋 参加を登録しました。\n${linesForEvent(ev).join('\n')}\n現在の参加者数: **${ev.participants.length}人**（参加者名はあなたのみ閲覧可）\nID:\`${ev.id}\``,
-        ephemeral: true
+      await interaction.editReply({
+        content: `🙋 参加を登録しました。\n${linesForEvent(ev).join('\n')}\n現在の参加者数: **${ev.participants.length}人**（参加者名はあなたのみ閲覧可）\nID:\`${ev.id}\``
       });
       return;
     }
 
     // 参加取消確定
     if (interaction.customId === 'evui_unjoin_select') {
+      await interaction.deferReply({ ephemeral: true });
       const id = interaction.values[0];
       const me = interaction.user.id;
       const events = loadEvents();
       const arr = events[interaction.guildId] ?? [];
       const ev = arr.find(e => e.id === id);
       if (!ev) {
-        await interaction.reply({ content: '⛔ 選択した予定が見つかりません。', ephemeral: true });
+        await interaction.editReply({ content: '⛔ 選択した予定が見つかりません。' });
         return;
       }
       ensureParticipants(ev);
@@ -529,22 +525,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await revokeAccessFromPrivateChannel(interaction.guild, ev.privateChannelId, me);
       }
 
-      await interaction.reply({
-        content: `↩️ 参加を取り消しました。\n${linesForEvent(ev).join('\n')}\n現在の参加者数: **${ev.participants.length}人**\nID:\`${ev.id}\``,
-        ephemeral: true
+      await interaction.editReply({
+        content: `↩️ 参加を取り消しました。\n${linesForEvent(ev).join('\n')}\n現在の参加者数: **${ev.participants.length}人**\nID:\`${ev.id}\``
       });
       return;
     }
 
-    // 参加者を見る
+    // 参加者を見る（重いかも→defer）
     if (interaction.customId === 'evui_viewmembers_select') {
+      await interaction.deferReply({ ephemeral: true });
       const id = interaction.values[0];
       const me = interaction.user.id;
       const events = loadEvents();
       const arr = events[interaction.guildId] ?? [];
       const ev = arr.find(e => e.id === id);
       if (!ev) {
-        await interaction.reply({ content: '⛔ 選択した予定が見つかりません。', ephemeral: true });
+        await interaction.editReply({ content: '⛔ 選択した予定が見つかりません。' });
         return;
       }
       ensureParticipants(ev);
@@ -554,14 +550,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (!joined) {
         if (isCreator) {
-          await interaction.reply({
-            content: `👀 参加者数: **${ev.participants.length}人**\n（参加者の**名前**は、参加登録後に閲覧できます）\n\n${linesForEvent(ev).join('\n')}\nID:\`${ev.id}\``,
-            ephemeral: true
+          await interaction.editReply({
+            content: `👀 参加者数: **${ev.participants.length}人**\n（参加者の**名前**は、参加登録後に閲覧できます）\n\n${linesForEvent(ev).join('\n')}\nID:\`${ev.id}\``
           });
         } else {
-          await interaction.reply({
-            content: `👀 参加者情報は**参加登録後**に閲覧できます。\n\n${linesForEvent(ev).join('\n')}\nID:\`${ev.id}\``,
-            ephemeral: true
+          await interaction.editReply({
+            content: `👀 参加者情報は**参加登録後**に閲覧できます。\n\n${linesForEvent(ev).join('\n')}\nID:\`${ev.id}\``
           });
         }
         return;
@@ -578,9 +572,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         })
       );
 
-      await interaction.reply({
-        content: `👥 参加者（${ev.participants.length}人）\n${names.join('\n')}\n\n${linesForEvent(ev).join('\n')}\nID:\`${ev.id}\``,
-        ephemeral: true
+      await interaction.editReply({
+        content: `👥 参加者（${ev.participants.length}人）\n${names.join('\n')}\n\n${linesForEvent(ev).join('\n')}\nID:\`${ev.id}\``
       });
       return;
     }
@@ -590,29 +583,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isModalSubmit()) {
     // 追加
     if (interaction.customId === 'evui_add_modal') {
+      await interaction.deferReply({ ephemeral: true });
+
       const dtStr = interaction.fields.getTextInputValue('evui_dt').trim();
       const scenarioName = interaction.fields.getTextInputValue('evui_scenario').trim();
       const systemName = interaction.fields.getTextInputValue('evui_system').trim();
 
       const cfg = getGuildConfig(interaction.guildId);
       if (!cfg?.logChannelId || !cfg?.eventCategoryId) {
-        await interaction.reply({ content: '⛔ 先に `/event config_setlogchannel` と `/event config_setcategory` を設定してください。', ephemeral: true });
+        await interaction.editReply({ content: '⛔ 先に `/event config_setlogchannel` と `/event config_setcategory` を設定してください。' });
         return;
       }
       if (!scenarioName.length) {
-        await interaction.reply({ content: '⛔ シナリオ名は必須です。', ephemeral: true });
+        await interaction.editReply({ content: '⛔ シナリオ名は必須です。' });
         return;
       }
 
       let datetimeUTC = null;
       if (dtStr.length) {
-        const dt = DateTime.fromFormat(dtStr, 'yyyy-MM-dd HH:mm', { zone: ZONE });
+        const dt = DateTime.fromFormat(dtStr, 'yyyy-LL-dd HH:mm', { zone: ZONE });
         if (!dt.isValid) {
-          await interaction.reply({ content: '⛔ 日付の形式が不正です。`yyyy-MM-dd HH:mm` で入力してください。', ephemeral: true });
+          await interaction.editReply({ content: '⛔ 日付の形式が不正です。`yyyy-MM-dd HH:mm` で入力してください。' });
           return;
         }
         if (dt < DateTime.now().setZone(ZONE)) {
-          await interaction.reply({ content: '⛔ 過去の日時は登録できません。', ephemeral: true });
+          await interaction.editReply({ content: '⛔ 過去の日時は登録できません。' });
           return;
         }
         datetimeUTC = dt.toUTC().toISO();
@@ -645,17 +640,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
         event.privateChannelId = createdChannelId;
       } catch (e) {
         console.error('シナリオch作成失敗:', e);
-        await interaction.reply({ content: `⛔ シナリオ用チャンネルの作成に失敗しました：${String(e?.message ?? e)}`, ephemeral: true });
+        await interaction.editReply({ content: `⛔ シナリオ用チャンネルの作成に失敗しました：${String(e?.message ?? e)}` });
         return;
       }
 
       events[interaction.guildId].push(event);
       saveEvents(events);
 
-      // 作成者にはエフェメラルでチャンネルを案内（便利）
-      await interaction.reply({
-        content: `✅ 予定を追加しました。\n${linesForEvent(event).join('\n')}\nシナリオ用チャンネル: <#${createdChannelId}>\nID:\`${id}\``,
-        ephemeral: true
+      // 作成者にはエフェメラルで案内
+      await interaction.editReply({
+        content: `✅ 予定を追加しました。\n${linesForEvent(event).join('\n')}\nシナリオ用チャンネル: <#${createdChannelId}>\nID:\`${id}\``
       });
 
       // 🔔 管理チャンネルへの通知（※チャンネルは表示しない）
@@ -665,7 +659,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           content: [
             `🗓️ **予定追加** by <@${interaction.user.id}>`,
             ...linesForEvent(event),
-            // ← チャンネルは通知に表示しない要求により非表示
             `ID:\`${id}\``
           ].join('\n')
         });
@@ -677,6 +670,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // 編集
     if (interaction.customId.startsWith('evui_edit_modal:')) {
+      await interaction.deferReply({ ephemeral: true });
+
       const id = interaction.customId.split(':')[1];
       const dtStr = interaction.fields.getTextInputValue('evui_dt').trim();
       const scenarioName = interaction.fields.getTextInputValue('evui_scenario').trim();
@@ -686,13 +681,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const arr = events[interaction.guildId] ?? [];
       const ev = arr.find(e => e.id === id);
       if (!ev) {
-        await interaction.reply({ content: '⛔ 対象の予定が見つかりません。', ephemeral: true });
+        await interaction.editReply({ content: '⛔ 対象の予定が見つかりません。' });
         return;
       }
       ensureParticipants(ev);
 
       if (!scenarioName.length) {
-        await interaction.reply({ content: '⛔ シナリオ名は空にできません。', ephemeral: true });
+        await interaction.editReply({ content: '⛔ シナリオ名は空にできません。' });
         return;
       }
 
@@ -702,13 +697,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         ev.datetimeUTC = null;
         ev.notified = false;
       } else {
-        const dt = DateTime.fromFormat(dtStr, 'yyyy-MM-dd HH:mm', { zone: ZONE });
+        const dt = DateTime.fromFormat(dtStr, 'yyyy-LL-dd HH:mm', { zone: ZONE });
         if (!dt.isValid) {
-          await interaction.reply({ content: '⛔ 日付の形式が不正です。`yyyy-MM-dd HH:mm` で入力してください。', ephemeral: true });
+          await interaction.editReply({ content: '⛔ 日付の形式が不正です。`yyyy-MM-dd HH:mm` で入力してください。' });
           return;
         }
         if (dt < DateTime.now().setZone(ZONE)) {
-          await interaction.reply({ content: '⛔ 過去の日時には変更できません。', ephemeral: true });
+          await interaction.editReply({ content: '⛔ 過去の日時には変更できません。' });
           return;
         }
         ev.datetimeUTC = dt.toUTC().toISO();
@@ -723,9 +718,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const beforeLines = linesForEvent(before).join('\n');
       const afterLines = linesForEvent(ev).join('\n');
 
-      await interaction.reply({
-        content: `✏️ 変更しました。\n**Before**\n${beforeLines}\n\n**After**\n${afterLines}\n※ シナリオ用チャンネル名は自動では変更しません（必要なら手動で変更可）\nID:\`${id}\``,
-        ephemeral: true
+      await interaction.editReply({
+        content: `✏️ 変更しました。\n**Before**\n${beforeLines}\n\n**After**\n${afterLines}\n※ シナリオ用チャンネル名は自動では変更しません（必要なら手動で変更可）\nID:\`${id}\``
       });
 
       // 🔔 管理チャンネルへの通知（チャンネルは表示しない）
