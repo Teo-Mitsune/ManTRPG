@@ -19,6 +19,31 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ZONE = 'Asia/Tokyo';
 
+client.on('debug', (m) => console.log('[debug]', m));
+client.on('warn', (m) => console.warn('[warn]', m));
+client.on('error', (e) => console.error('[error]', e));
+process.on('unhandledRejection', (r) => console.error('[unhandledRejection]', r));
+process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
+
+async function safeAck(interaction, ephemeral = true) {
+  if (interaction.deferred || interaction.replied) return;
+  try {
+    await interaction.deferReply({ ephemeral });
+  } catch { /* 既にACK済みでも無視 */ }
+}
+
+async function safeEdit(interaction, payload) {
+  try {
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply(payload);
+    } else {
+      await interaction.reply({ ...payload, ephemeral: true });
+    }
+  } catch (e) {
+    console.error('[safeEdit]', e);
+  }
+}
+
 // GuildMembers は不要運用（必要なら有効化）
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -144,6 +169,20 @@ async function revokeAccessFromPrivateChannel(guild, channelId, userId) {
 
 /* ----------------- interactions ----------------- */
 client.on(Events.InteractionCreate, async (interaction) => {
+  try {
+    const base = `[${new Date().toISOString()}] ${interaction.guild?.name ?? 'DM'} / ${interaction.user?.tag ?? 'unknown'}`;
+    if (interaction.isChatInputCommand()) {
+      console.log(`${base} → CMD /${interaction.commandName} ${interaction.options.getSubcommand(false) ?? ''}`);
+    } else if (interaction.isButton()) {
+      console.log(`${base} → BUTTON ${interaction.customId}`);
+    } else if (interaction.isStringSelectMenu()) {
+      console.log(`${base} → SELECT ${interaction.customId} values=${interaction.values?.join(',')}`);
+    } else if (interaction.isModalSubmit()) {
+      console.log(`${base} → MODAL ${interaction.customId}`);
+    } else {
+      console.log(`${base} → OTHER INTERACTION`);
+    }
+  } catch {}
   // Slash Command
   if (interaction.isChatInputCommand()) {
     const cmd = client.commands.get(interaction.commandName);
@@ -743,6 +782,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       return;
     }
+    
+  }
+  if (interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit()) {
+    await safeAck(interaction); // 3秒ルール回避
+    const id = 'customId' in interaction ? interaction.customId : '(modal)';
+    await safeEdit(interaction, {
+      content: `⛔ この操作には現在のBotが対応していません。\n古いメッセージ/ボタンの可能性があります。\nID: \`${id}\``
+    });
+    return;
   }
 });
 
