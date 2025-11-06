@@ -1,10 +1,9 @@
 // src/utils/storage.js
-// 既存コードの呼び出し互換API（同期）で、裏側をPostgreSQL永続化に差し替え。
-// - loadEvents(): 同期。メモリキャッシュを返す
-// - saveEvents(obj): 同期。キャッシュ更新して非同期でDBへ全置換保存
-// - getGuildConfig(gid): 同期
-// - setGuildConfig(gid, patch): 同期（非同期でDBへUPSERT）
-// ※ 起動時にDBから読み込んでキャッシュ初期化（Top-level await）
+// 既存の同期APIを保ったまま、裏側をPostgreSQLに永続化。
+// - events系: loadEvents/saveEvents/ensureGuildBucket（同期: メモリキャッシュ、裏で非同期保存）
+// - ギルド設定: getGuildConfig/setGuildConfig
+// - 追加: ロール配布用設定（旧roles.js互換）loadConfig/saveConfig/ensureRolesPanelConfig
+//   → app_configs テーブル(JSONB)に { [guildId]: { rolesPanel: {...} } } を保存
 
 import crypto from 'crypto';
 import pg from 'pg';
@@ -13,7 +12,7 @@ const { Pool } = pg;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) {
-  throw new Error('DATABASE_URL is not set. Set it in environment variables.');
+  throw new Error('DATABASE_URL is not set. Please define it in environment variables.');
 }
 
 const pool = new Pool({
@@ -21,13 +20,14 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false } // Neon/Supabase等で必要
 });
 
-// -------- スキーマ作成（初回のみ） --------
+// ---------- スキーマ ----------
 const initSQL = `
 CREATE TABLE IF NOT EXISTS guild_configs (
   guild_id TEXT PRIMARY KEY,
   log_channel_id TEXT,
   event_category_id TEXT
 );
+
 CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY,
   guild_id TEXT NOT NULL,
@@ -38,51 +38,57 @@ CREATE TABLE IF NOT EXISTS events (
   notified BOOLEAN NOT NULL DEFAULT FALSE,
   private_channel_id TEXT NULL
 );
+
 CREATE TABLE IF NOT EXISTS participants (
   event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
   user_id TEXT NOT NULL,
   PRIMARY KEY (event_id, user_id)
 );
+
 CREATE INDEX IF NOT EXISTS idx_events_guild ON events(guild_id);
 CREATE INDEX IF NOT EXISTS idx_participants_event ON participants(event_id);
+
+/* 追加: 任意のアプリ設定(JSONB)。roles.js の設定をここに入れる */
+CREATE TABLE IF NOT EXISTS app_configs (
+  guild_id TEXT PRIMARY KEY,
+  data JSONB NOT NULL DEFAULT '{}'::jsonb
+);
 `;
 
-// -------- メモリキャッシュ --------
-let cacheEvents = {}; // { [guildId]: Array<Event> }
-let cacheConfig = {}; // { [guildId]: { logChannelId, eventCategoryId } }
+// ---------- メモリキャッシュ ----------
+let cacheEvents = {};   // { [guildId]: Event[] }
+let cacheGConfigs = {}; // { [guildId]: { logChannelId, eventCategoryId } }
+let cacheAppCfg = {};   // { [guildId]: { rolesPanel?: { channelId, messageId, roles: { [roleId]: {label?:string, emoji?:string} } } } }
 let inited = false;
 
-// 深いところまで弄られても壊れないように、最低限のクローンを返す
-function clone(obj) {
-  return JSON.parse(JSON.stringify(obj));
-}
+const clone = (o) => JSON.parse(JSON.stringify(o ?? {}));
 
-// DB -> キャッシュ へ全ロード
+// ---------- 初期ロード ----------
 async function loadAllFromDB() {
   const client = await pool.connect();
   try {
     await client.query(initSQL);
 
+    // guild_configs
     const cfg = await client.query('SELECT * FROM guild_configs');
-    cacheConfig = {};
+    cacheGConfigs = {};
     for (const r of cfg.rows) {
-      cacheConfig[r.guild_id] = {
+      cacheGConfigs[r.guild_id] = {
         logChannelId: r.log_channel_id ?? null,
         eventCategoryId: r.event_category_id ?? null
       };
     }
 
-    const eventsRes = await client.query('SELECT * FROM events');
-    const partsRes  = await client.query('SELECT * FROM participants');
-
+    // events / participants
+    const evRes = await client.query('SELECT * FROM events');
+    const paRes = await client.query('SELECT * FROM participants');
     const pmap = new Map(); // event_id -> [user_id]
-    for (const p of partsRes.rows) {
+    for (const p of paRes.rows) {
       if (!pmap.has(p.event_id)) pmap.set(p.event_id, []);
       pmap.get(p.event_id).push(p.user_id);
     }
-
     cacheEvents = {};
-    for (const e of eventsRes.rows) {
+    for (const e of evRes.rows) {
       const ev = {
         id: e.id,
         datetimeUTC: e.datetime_utc ? e.datetime_utc.toISOString() : null,
@@ -96,67 +102,87 @@ async function loadAllFromDB() {
       if (!cacheEvents[e.guild_id]) cacheEvents[e.guild_id] = [];
       cacheEvents[e.guild_id].push(ev);
     }
+
+    // app_configs（roles.js互換）
+    const app = await client.query('SELECT guild_id, data FROM app_configs');
+    cacheAppCfg = {};
+    for (const r of app.rows) {
+      cacheAppCfg[r.guild_id] = r.data ?? {};
+    }
+
     inited = true;
     console.log('[storage] DB loaded: configs=%d, guilds=%d',
-      Object.keys(cacheConfig).length, Object.keys(cacheEvents).length);
+      Object.keys(cacheGConfigs).length, Object.keys(cacheEvents).length);
   } finally {
     client.release();
   }
 }
-
-// 起動時に同期完了させる（Top-level await）
 await loadAllFromDB();
 
-// --------- 公開API（既存互換・同期） ---------
+// ---------- 公開API（既存互換） ----------
 export function makeId(bytes = 6) {
-  return crypto.randomBytes(bytes).toString('hex'); // 12 hex
+  return crypto.randomBytes(bytes).toString('hex');
 }
 
-// { guildId: Event[] } を返す（同期・キャッシュ）
+// --- events（同期キャッシュ + 非同期保存） ---
 export function loadEvents() {
-  if (!inited) {
-    // 理論上ここには来ないはずだが、一応フェイルセーフ
-    console.warn('[storage] loadEvents before init; returning empty object');
-    return {};
-  }
   return clone(cacheEvents);
 }
-
-// 受け取った全体でキャッシュ更新 → 非同期でDBへ全置換保存
-export function saveEvents(eventsObj) {
-  cacheEvents = clone(eventsObj ?? {});
-  // 非同期でDB反映
-  void persistEventsToDB(cacheEvents).catch(err => {
-    console.error('[storage] persist events failed:', err);
-  });
+export function saveEvents(obj) {
+  cacheEvents = clone(obj ?? {});
+  void persistEventsToDB(cacheEvents).catch(e =>
+    console.error('[storage] persist events failed:', e)
+  );
 }
-
-// guildId の配列バケツを必ず用意（同期・キャッシュ）
 export function ensureGuildBucket(eventsObj, guildId) {
   if (!eventsObj[guildId]) eventsObj[guildId] = [];
   return eventsObj;
 }
 
-// 設定取得（同期・キャッシュ）
+// --- guild_configs（同期キャッシュ + 非同期UPSERT） ---
 export function getGuildConfig(guildId) {
-  return clone(cacheConfig[guildId] ?? { logChannelId: null, eventCategoryId: null });
+  return clone(cacheGConfigs[guildId] ?? { logChannelId: null, eventCategoryId: null });
 }
-
-// 設定更新（同期・キャッシュ更新 → 非同期UPSERT）
 export function setGuildConfig(guildId, patch) {
-  const cur = cacheConfig[guildId] ?? { logChannelId: null, eventCategoryId: null };
+  const cur = cacheGConfigs[guildId] ?? { logChannelId: null, eventCategoryId: null };
   const next = {
     logChannelId: (Object.prototype.hasOwnProperty.call(patch, 'logChannelId') ? patch.logChannelId : cur.logChannelId) ?? null,
     eventCategoryId: (Object.prototype.hasOwnProperty.call(patch, 'eventCategoryId') ? patch.eventCategoryId : cur.eventCategoryId) ?? null
   };
-  cacheConfig[guildId] = next;
-  void persistConfigToDB(guildId, next).catch(err => {
-    console.error('[storage] persist config failed:', err);
-  });
+  cacheGConfigs[guildId] = next;
+  void persistGuildConfigToDB(guildId, next).catch(e =>
+    console.error('[storage] persist guild_config failed:', e)
+  );
   return clone(next);
 }
 
-// --------- 内部：DB保存実体（非同期） ---------
+// --- app_configs（roles.js互換API） ---
+/** 旧roles.jsが使う全体設定オブジェクトを返す（同期・キャッシュ） */
+export function loadConfig() {
+  return clone(cacheAppCfg);
+}
+/** 全体設定オブジェクトを保存（同期キャッシュ更新 → 非同期でDB全置換） */
+export function saveConfig(obj) {
+  cacheAppCfg = clone(obj ?? {});
+  void persistAppConfigToDB(cacheAppCfg).catch(e =>
+    console.error('[storage] persist app_config failed:', e)
+  );
+}
+/** roles.jsが使う {guildId}.rolesPanel を必ず用意 */
+export function ensureRolesPanelConfig(cfgObj, guildId) {
+  if (!cfgObj[guildId]) cfgObj[guildId] = {};
+  if (!cfgObj[guildId].rolesPanel) {
+    cfgObj[guildId].rolesPanel = { channelId: null, messageId: null, roles: {} };
+  } else {
+    // 欠損を補完
+    cfgObj[guildId].rolesPanel.channelId ??= null;
+    cfgObj[guildId].rolesPanel.messageId ??= null;
+    cfgObj[guildId].rolesPanel.roles ??= {};
+  }
+  return cfgObj;
+}
+
+// ---------- 内部: DB永続化 ----------
 async function persistEventsToDB(all) {
   const client = await pool.connect();
   try {
@@ -171,7 +197,7 @@ async function persistEventsToDB(all) {
     `;
     const paInsert = `INSERT INTO participants (event_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`;
 
-    for (const gid of Object.keys(all)) {
+    for (const gid of Object.keys(all ?? {})) {
       const arr = Array.isArray(all[gid]) ? all[gid] : [];
       for (const ev of arr) {
         await client.query(evInsert, [
@@ -199,7 +225,7 @@ async function persistEventsToDB(all) {
   }
 }
 
-async function persistConfigToDB(guildId, cfg) {
+async function persistGuildConfigToDB(guildId, cfg) {
   const upsert = `
     INSERT INTO guild_configs (guild_id, log_channel_id, event_category_id)
     VALUES ($1,$2,$3)
@@ -208,4 +234,22 @@ async function persistConfigToDB(guildId, cfg) {
                   event_category_id = EXCLUDED.event_category_id
   `;
   await pool.query(upsert, [guildId, cfg.logChannelId, cfg.eventCategoryId]);
+}
+
+async function persistAppConfigToDB(all) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM app_configs');
+    const ins = `INSERT INTO app_configs (guild_id, data) VALUES ($1, $2::jsonb)`;
+    for (const gid of Object.keys(all ?? {})) {
+      await client.query(ins, [gid, JSON.stringify(all[gid] ?? {})]);
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 }
