@@ -227,6 +227,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isButton()) {
     const id = interaction.customId;
 
+    if (id.startsWith('rolebtn:')) {
+      await safeAck(interaction); // 3秒ルール回避（最優先）
+      const roleId = id.split(':')[1];
+      try {
+        const role = interaction.guild.roles.cache.get(roleId) ?? await interaction.guild.roles.fetch(roleId).catch(() => null);
+        if (!role) {
+          await interaction.editReply({ content: '⛔ ロールが見つかりません。' });
+          return;
+        }
+        const member = await interaction.guild.members.fetch(interaction.user.id);
+        const has = member.roles.cache.has(role.id);
+        if (has) await member.roles.remove(role.id);
+        else     await member.roles.add(role.id);
+  
+        await interaction.editReply({ content: has ? `🔻 <@&${role.id}> を外しました。` : `🔺 <@&${role.id}> を付与しました。` });
+      } catch (e) {
+        console.error('[rolebtn]', e);
+        await interaction.editReply({ content: '⚠️ ロールの付与/剥奪に失敗しました。Bot権限（Manage Roles）とロール順位を確認してください。' });
+      }
+      return;
+    }
+
     // 追加 → モーダル（シナリオ名は必須）
     if (id === 'evui_add') {
       const cfg = getGuildConfig(interaction.guildId);

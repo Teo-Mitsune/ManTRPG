@@ -240,10 +240,14 @@ async function persistAppConfigToDB(all) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query('DELETE FROM app_configs');
-    const ins = `INSERT INTO app_configs (guild_id, data) VALUES ($1, $2::jsonb)`;
+    const upsert = `
+      INSERT INTO app_configs (guild_id, data)
+      VALUES ($1, $2::jsonb)
+      ON CONFLICT (guild_id)
+      DO UPDATE SET data = EXCLUDED.data
+    `;
     for (const gid of Object.keys(all ?? {})) {
-      await client.query(ins, [gid, JSON.stringify(all[gid] ?? {})]);
+      await client.query(upsert, [gid, JSON.stringify(all[gid] ?? {})]);
     }
     await client.query('COMMIT');
   } catch (e) {
