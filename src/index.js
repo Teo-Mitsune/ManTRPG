@@ -187,40 +187,41 @@ client.on(Events.InteractionCreate, async (interaction) => {
       console.log(`${base} → OTHER INTERACTION`);
     }
   } catch {}
-  // Slash Command
-  if (interaction.isChatInputCommand()) {
-    const cmd = client.commands.get(interaction.commandName);
-    if (!cmd) return;
+// Slash Command
+if (interaction.isChatInputCommand()) {
+  const cmd = client.commands.get(interaction.commandName);
+  if (!cmd) return;
 
-    // ★ /ui → GUIパネル（即時返信）
-    if (interaction.commandName === 'ui') {
-      const row1 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('evui_add').setLabel('予定を追加').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('evui_list').setLabel('予定一覧').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('evui_edit').setLabel('予定を編集').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('evui_remove').setLabel('予定を削除').setStyle(ButtonStyle.Danger),
-      );
-      const row2 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('evui_join').setLabel('参加する').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('evui_unjoin').setLabel('参加取消').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('evui_viewmembers').setLabel('参加者を見る').setStyle(ButtonStyle.Secondary),
-      );
-      await interaction.reply({ content: '📋 **予定パネル**', components: [row1, row2], ephemeral: true });
-      return;
-    }
-
-    try {
-      await cmd.execute(interaction);
-    } catch (err) {
-      console.error(err);
-      if (interaction.deferred || interaction.replied) {
-        await interaction.followUp({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true }).catch(() => {});
-      } else {
-        await interaction.reply({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true }).catch(() => {});
-      }
-    }
+  // /ui → GUIパネル（/event ui は廃止）
+  if (interaction.commandName === 'ui') {
+    const row1 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('evui_add').setLabel('予定を追加').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('evui_list').setLabel('予定一覧').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('evui_edit').setLabel('予定を編集').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('evui_remove').setLabel('予定を削除').setStyle(ButtonStyle.Danger),
+    );
+    const row2 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('evui_join').setLabel('参加する').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('evui_unjoin').setLabel('参加取消').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('evui_viewmembers').setLabel('参加者を見る').setStyle(ButtonStyle.Secondary),
+    );
+    await interaction.reply({ content: '📋 **予定パネル**', components: [row1, row2], ephemeral: true });
     return;
   }
+
+  // 通常のコマンド実行
+  try {
+    await cmd.execute(interaction);
+  } catch (err) {
+    console.error(err);
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true }).catch(() => {});
+    } else {
+      await interaction.reply({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true }).catch(() => {});
+    }
+  }
+  return;
+}
 
   // Buttons
   if (interaction.isButton()) {
