@@ -8,22 +8,19 @@ import {
 } from 'discord.js';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, join } from 'path';
-import { readdirSync } from 'fs';
+import { readdirSync, existsSync } from 'fs';
 import { DateTime } from 'luxon';
 import { startScheduler } from './scheduler.js';
 import {
   loadEvents, saveEvents, ensureGuildBucket, makeId,
-  getGuildConfig, initStorage
+  getGuildConfig
 } from './utils/storage.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ZONE = 'Asia/Tokyo';
 
-// ★ ストレージ初期化（モジュール読み込み直後にDBへ行かない設計へ）
-await initStorage();
-
-// GuildMembers は不要運用（必要なら有効化）
+// ---- client & basic handlers ----
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.on('debug', (m) => console.log('[debug]', m));
@@ -32,29 +29,40 @@ client.on('error', (e) => console.error('[error]', e));
 process.on('unhandledRejection', (r) => console.error('[unhandledRejection]', r));
 process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
 
-// コマンド読み込み
+// ---- command loader ----
 client.commands = new Collection();
-const commandsPath = join(__dirname, 'commands');
-for (const file of readdirSync(commandsPath)) {
-  if (!file.endsWith('.js')) continue;
-  const filePath = join(commandsPath, file);
-  const fileUrl = pathToFileURL(filePath).href;
-  const { command } = await import(fileUrl);
-  client.commands.set(command.data.name, command);
+{
+  // src/commands と ルート/commands の両対応（どちらか存在する方を使う）
+  const candidates = [
+    join(__dirname, 'commands'),        // /workspace/src/commands
+    join(__dirname, '..', 'commands'),  // /workspace/commands
+  ];
+  const commandsPath = candidates.find(p => existsSync(p));
+  if (!commandsPath) {
+    throw new Error(`commands ディレクトリが見つかりません。試行: ${candidates.join(' , ')}`);
+  }
+  const files = readdirSync(commandsPath).filter(f => f.endsWith('.js'));
+  for (const file of files) {
+    const fileUrl = pathToFileURL(join(commandsPath, file)).href;
+    const { command } = await import(fileUrl);
+    if (!command?.data?.name) continue;
+    client.commands.set(command.data.name, command);
+  }
+  console.log('[loaded commands]', [...client.commands.keys()]);
 }
 
 client.once(Events.ClientReady, (c) => {
   console.log(`✅ Logged in as ${c.user.tag}`);
-  startScheduler(client); // 30秒おきに通知チェック
+  startScheduler(client);
 });
 
+// ---- helpers ----
 async function safeAck(interaction, ephemeral = true) {
   if (interaction.deferred || interaction.replied) return;
   try {
     await interaction.deferReply({ ephemeral });
-  } catch { /* 既にACK済みでも無視 */ }
+  } catch { /* noop */ }
 }
-
 async function safeEdit(interaction, payload) {
   try {
     if (interaction.deferred || interaction.replied) {
@@ -67,7 +75,6 @@ async function safeEdit(interaction, payload) {
   }
 }
 
-/* ----------------- helpers ----------------- */
 function formatJST(isoUtc) {
   return isoUtc ? DateTime.fromISO(isoUtc).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') : null;
 }
@@ -91,7 +98,7 @@ function ensureParticipants(ev) {
   return ev;
 }
 function slugifyName(name) {
-  return name
+  return (name || 'scenario')
     .toLowerCase()
     .replace(/[\s　]+/g, '-')
     .replace(/[^\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}0-9a-z-_]/giu, '-')
@@ -100,13 +107,14 @@ function slugifyName(name) {
     .slice(0, 90);
 }
 async function createPrivateChannelForScenario(interaction, scenarioName, createdByUserId, categoryId) {
-  const base = slugifyName(scenarioName) || 'scenario';
+  const base = slugifyName(scenarioName);
   const parent = await interaction.guild.channels.fetch(categoryId).catch(() => null);
   if (!parent || parent.type !== ChannelType.GuildCategory) {
     throw new Error('カテゴリが無効です。/config setcategory で正しいカテゴリを設定してください。');
   }
 
-  const siblings = parent.children?.cache ?? (await interaction.guild.channels.fetch()).filter(ch => ch.parentId === parent.id);
+  const all = await interaction.guild.channels.fetch();
+  const siblings = all.filter(ch => ch.parentId === parent.id);
   let name = base;
   let i = 2;
   while (siblings.find(ch => ch.name === name)) {
@@ -171,7 +179,7 @@ async function revokeAccessFromPrivateChannel(guild, channelId, userId) {
   }
 }
 
-/* ----------------- interactions ----------------- */
+// ---- interaction handler ----
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
     const base = `[${new Date().toISOString()}] ${interaction.guild?.name ?? 'DM'} / ${interaction.user?.tag ?? 'unknown'}`;
@@ -187,29 +195,48 @@ client.on(Events.InteractionCreate, async (interaction) => {
       console.log(`${base} → OTHER INTERACTION`);
     }
   } catch {}
-// Slash Command
-if (interaction.isChatInputCommand()) {
-  const cmd = client.commands.get(interaction.commandName);
-  if (!cmd) return;
 
-  // 通常のコマンド実行
-  try {
-    await cmd.execute(interaction);
-  } catch (err) {
-    console.error(err);
-    if (interaction.deferred || interaction.replied) {
-      await interaction.followUp({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true }).catch(() => {});
-    } else {
-      await interaction.reply({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true }).catch(() => {});
+  // Slash Command
+  if (interaction.isChatInputCommand()) {
+    const cmd = client.commands.get(interaction.commandName);
+    if (!cmd) return;
+
+    // /ui → 予定パネル（ここでハンドリング）
+    if (interaction.commandName === 'ui') {
+      const row1 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('ui_add').setLabel('予定を追加').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('ui_list').setLabel('予定一覧').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('ui_edit').setLabel('予定を編集').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('ui_remove').setLabel('予定を削除').setStyle(ButtonStyle.Danger),
+      );
+      const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('ui_join').setLabel('参加する').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('ui_unjoin').setLabel('参加取消').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('ui_viewmembers').setLabel('参加者を見る').setStyle(ButtonStyle.Secondary),
+      );
+      await interaction.reply({ content: '📋 **予定パネル**', components: [row1, row2], ephemeral: true });
+      return;
     }
-  }
-  return;
-}
 
-  // Buttons
+    // その他は通常実行
+    try {
+      await cmd.execute(interaction);
+    } catch (err) {
+      console.error(err);
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true }).catch(() => {});
+      } else {
+        await interaction.reply({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true }).catch(() => {});
+      }
+    }
+    return;
+  }
+
+  // ----- Buttons -----
   if (interaction.isButton()) {
     const id = interaction.customId;
 
+    // ロール配布（既存互換: rolebtn:<roleId>）
     if (id.startsWith('rolebtn:')) {
       await safeAck(interaction);
       const roleId = id.split(':')[1];
@@ -227,12 +254,12 @@ if (interaction.isChatInputCommand()) {
         await interaction.editReply({ content: has ? `🔻 <@&${role.id}> を外しました。` : `🔺 <@&${role.id}> を付与しました。` });
       } catch (e) {
         console.error('[rolebtn]', e);
-        await interaction.editReply({ content: '⚠️ ロールの付与/剥奪に失敗しました。Bot権限（Manage Roles）とロール順位を確認してください。' });
+        await interaction.editReply({ content: '⚠️ ロール付与/剥奪に失敗しました。Bot権限（Manage Roles）とロール順位をご確認ください。' });
       }
       return;
     }
 
-    // 追加 → モーダル
+    // 予定追加 → モーダル表示（customId: ui_add）
     if (id === 'ui_add') {
       const cfg = getGuildConfig(interaction.guildId);
       if (!cfg?.logChannelId) {
@@ -310,7 +337,7 @@ if (interaction.isChatInputCommand()) {
       return;
     }
 
-    // 編集
+    // 編集対象選択
     if (id === 'ui_edit') {
       const events = loadEvents();
       const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
@@ -336,7 +363,7 @@ if (interaction.isChatInputCommand()) {
       return;
     }
 
-    // 削除
+    // 削除対象選択
     if (id === 'ui_remove') {
       const events = loadEvents();
       const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
@@ -361,7 +388,7 @@ if (interaction.isChatInputCommand()) {
       return;
     }
 
-    // 参加
+    // 参加対象選択
     if (id === 'ui_join') {
       const events = loadEvents();
       const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
@@ -389,7 +416,7 @@ if (interaction.isChatInputCommand()) {
       return;
     }
 
-    // 参加取消
+    // 参加取消対象選択
     if (id === 'ui_unjoin') {
       const me = interaction.user.id;
       const events = loadEvents();
@@ -418,7 +445,7 @@ if (interaction.isChatInputCommand()) {
       return;
     }
 
-    // 参加者を見る
+    // 参加者確認 対象選択
     if (id === 'ui_viewmembers') {
       const events = loadEvents();
       const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
@@ -446,13 +473,20 @@ if (interaction.isChatInputCommand()) {
       return;
     }
 
+    // 未対応ボタン → フォールバック
+    await safeAck(interaction);
+    await safeEdit(interaction, {
+      content: `⛔ この操作には現在のBotが対応していません。\n古いメッセージ/ボタンの可能性があります。\nID: \`${id}\``
+    });
     return;
   }
 
-  // Select Menu（確定ステップ）
+  // ----- Select Menu -----
   if (interaction.isStringSelectMenu()) {
-    // 編集
-    if (interaction.customId === 'ui_edit_select') {
+    const cid = interaction.customId;
+
+    // 編集：対象選択 → モーダル
+    if (cid === 'ui_edit_select') {
       const id = interaction.values[0];
       const events = loadEvents();
       const arr = events[interaction.guildId] ?? [];
@@ -501,8 +535,8 @@ if (interaction.isChatInputCommand()) {
       return;
     }
 
-    // 削除
-    if (interaction.customId === 'ui_remove_select') {
+    // 削除：確定
+    if (cid === 'ui_remove_select') {
       await interaction.deferReply({ ephemeral: true });
       const id = interaction.values[0];
       const events = loadEvents();
@@ -522,8 +556,8 @@ if (interaction.isChatInputCommand()) {
       return;
     }
 
-    // 参加確定
-    if (interaction.customId === 'ui_join_select') {
+    // 参加：確定
+    if (cid === 'ui_join_select') {
       await interaction.deferReply({ ephemeral: true });
       const id = interaction.values[0];
       const me = interaction.user.id;
@@ -552,8 +586,8 @@ if (interaction.isChatInputCommand()) {
       return;
     }
 
-    // 参加取消確定
-    if (interaction.customId === 'ui_unjoin_select') {
+    // 参加取消：確定
+    if (cid === 'ui_unjoin_select') {
       await interaction.deferReply({ ephemeral: true });
       const id = interaction.values[0];
       const me = interaction.user.id;
@@ -578,8 +612,8 @@ if (interaction.isChatInputCommand()) {
       return;
     }
 
-    // 参加者を見る
-    if (interaction.customId === 'ui_viewmembers_select') {
+    // 参加者を見る：確定
+    if (cid === 'ui_viewmembers_select') {
       await interaction.deferReply({ ephemeral: true });
       const id = interaction.values[0];
       const me = interaction.user.id;
@@ -624,8 +658,163 @@ if (interaction.isChatInputCommand()) {
       });
       return;
     }
+
+    // 未対応セレクト → フォールバック
+    await safeAck(interaction);
+    await safeEdit(interaction, {
+      content: `⛔ この操作には現在のBotが対応していません。\n古いメッセージ/ボタンの可能性があります。\nID: \`${cid}\``
+    });
+    return;
   }
 
+  // ----- Modal Submit -----
+  if (interaction.isModalSubmit()) {
+    const id = interaction.customId;
+
+    // 予定 追加（customId: ui_add）
+    if (id === 'ui_add') {
+      try {
+        const dtText   = interaction.fields.getTextInputValue('ui_dt')?.trim() ?? '';
+        const scenario = interaction.fields.getTextInputValue('ui_scenario')?.trim() ?? '';
+        const system   = interaction.fields.getTextInputValue('ui_system')?.trim() ?? '';
+
+        if (!scenario) {
+          await interaction.reply({ content: '⛔ シナリオ名は必須です。', ephemeral: true });
+          return;
+        }
+
+        const cfg = getGuildConfig(interaction.guildId);
+        if (!cfg?.logChannelId) {
+          await interaction.reply({ content: '⛔ `/config setlogchannel` を先に設定してください。', ephemeral: true });
+          return;
+        }
+        if (!cfg?.eventCategoryId) {
+          await interaction.reply({ content: '⛔ `/config setcategory` を先に設定してください。', ephemeral: true });
+          return;
+        }
+
+        // JST → UTC（空なら未設定扱い）
+        let isoUTC = null;
+        if (dtText) {
+          const parsed = DateTime.fromFormat(dtText, 'yyyy-LL-dd HH:mm', { zone: ZONE });
+          if (!parsed.isValid) {
+            await interaction.reply({ content: '⛔ 日付の形式が不正です。`yyyy-MM-dd HH:mm` で入力してください。', ephemeral: true });
+            return;
+          }
+          isoUTC = parsed.toUTC().toISO();
+        }
+
+        // 個室チャンネル作成（作成者に権限付与）
+        const privateChannelId = await createPrivateChannelForScenario(
+          interaction, scenario, interaction.user.id, cfg.eventCategoryId
+        );
+
+        // 保存
+        const events = loadEvents();
+        ensureGuildBucket(events, interaction.guildId);
+        const ev = {
+          id: makeId(7),
+          datetimeUTC: isoUTC,
+          scenarioName: scenario,
+          systemName: system || null,
+          createdBy: interaction.user.id,
+          participants: [interaction.user.id],
+          notified: false,
+          privateChannelId
+        };
+        events[interaction.guildId].push(ev);
+        saveEvents(events);
+
+        await interaction.reply({
+          content: [
+            '✅ **予定を作成しました**',
+            `【日付】${isoUTC ? DateTime.fromISO(isoUTC).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') + ' (JST)' : '未設定'}`,
+            `【シナリオ名】${scenario}`,
+            `【システム名】${system || '未設定'}`,
+            `【GM名】<@${interaction.user.id}>`,
+            `【部屋】<#${privateChannelId}>`,
+            `ID:\`${ev.id}\``
+          ].join('\n'),
+          ephemeral: true
+        });
+      } catch (e) {
+        console.error('[modal ui_add]', e);
+        if (interaction.deferred || interaction.replied) {
+          await interaction.followUp({ content: '⚠️ 予定作成に失敗しました。', ephemeral: true }).catch(() => {});
+        } else {
+          await interaction.reply({ content: '⚠️ 予定作成に失敗しました。', ephemeral: true }).catch(() => {});
+        }
+      }
+      return;
+    }
+
+    // 予定 編集（customId: ui_edit_modal:<eventId>）
+    if (id.startsWith('ui_edit_modal:')) {
+      const targetId = id.split(':')[1];
+      try {
+        const dtText   = interaction.fields.getTextInputValue('ui_dt')?.trim() ?? '';
+        const scenario = interaction.fields.getTextInputValue('ui_scenario')?.trim() ?? '';
+        const system   = interaction.fields.getTextInputValue('ui_system')?.trim() ?? '';
+
+        if (!scenario) {
+          await interaction.reply({ content: '⛔ シナリオ名は空にできません。', ephemeral: true });
+          return;
+        }
+
+        let isoUTC = null;
+        if (dtText) {
+          const parsed = DateTime.fromFormat(dtText, 'yyyy-LL-dd HH:mm', { zone: ZONE });
+          if (!parsed.isValid) {
+            await interaction.reply({ content: '⛔ 日付の形式が不正です。`yyyy-MM-dd HH:mm` を指定してください。', ephemeral: true });
+            return;
+          }
+          isoUTC = parsed.toUTC().toISO();
+        }
+
+        const events = loadEvents();
+        const arr = events[interaction.guildId] ?? [];
+        const ev = arr.find(e => e.id === targetId);
+        if (!ev) {
+          await interaction.reply({ content: '⛔ 対象の予定が見つかりません。', ephemeral: true });
+          return;
+        }
+
+        ev.datetimeUTC = dtText ? isoUTC : null;   // 空なら日付クリア
+        ev.scenarioName = scenario;                // 必須
+        ev.systemName = system ? system : null;    // 空ならクリア
+        saveEvents(events);
+
+        await interaction.reply({
+          content: [
+            '✏️ **予定を更新しました**',
+            `【日付】${ev.datetimeUTC ? DateTime.fromISO(ev.datetimeUTC).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') + ' (JST)' : '未設定'}`,
+            `【シナリオ名】${ev.scenarioName}`,
+            `【システム名】${ev.systemName ?? '未設定'}`,
+            `【GM名】<@${ev.createdBy}>`,
+            `ID:\`${ev.id}\``
+          ].join('\n'),
+          ephemeral: true
+        });
+      } catch (e) {
+        console.error('[modal ui_edit_modal]', e);
+        if (interaction.deferred || interaction.replied) {
+          await interaction.followUp({ content: '⚠️ 予定更新に失敗しました。', ephemeral: true }).catch(() => {});
+        } else {
+          await interaction.reply({ content: '⚠️ 予定更新に失敗しました。', ephemeral: true }).catch(() => {});
+        }
+      }
+      return;
+    }
+
+    // 未対応モーダル → フォールバック
+    await safeAck(interaction);
+    await safeEdit(interaction, {
+      content: `⛔ この操作には現在のBotが対応していません。\n古いメッセージ/ボタンの可能性があります。\nID: \`${id}\``
+    });
+    return;
+  }
+
+  // ここまでのどれにも当てはまらない → フォールバック
   if (interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit()) {
     await safeAck(interaction);
     const id = 'customId' in interaction ? interaction.customId : '(modal)';
