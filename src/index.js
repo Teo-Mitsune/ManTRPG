@@ -245,7 +245,7 @@ if (interaction.isChatInputCommand()) {
       }
 
       const modal = new ModalBuilder()
-        .setCustomId('ui_add_modal')
+        .setCustomId('ui_add')
         .setTitle('予定を追加（JST）');
 
       const dateTime = new TextInputBuilder()

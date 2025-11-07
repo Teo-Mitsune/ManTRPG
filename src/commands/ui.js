@@ -15,16 +15,16 @@ export const command = {
 
   async execute(interaction) {
     const row1 = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('evui_add').setLabel('予定を追加').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('evui_list').setLabel('予定一覧').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('evui_edit').setLabel('予定を編集').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('evui_remove').setLabel('予定を削除').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('ui_add').setLabel('予定を追加').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('ui_list').setLabel('予定一覧').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('ui_edit').setLabel('予定を編集').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('ui_remove').setLabel('予定を削除').setStyle(ButtonStyle.Danger),
     );
 
     const row2 = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('evui_join').setLabel('参加する').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('evui_unjoin').setLabel('参加取消').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('evui_viewmembers').setLabel('参加者を見る').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('ui_join').setLabel('参加する').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('ui_unjoin').setLabel('参加取消').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('ui_viewmembers').setLabel('参加者を見る').setStyle(ButtonStyle.Secondary),
     );
 
     await interaction.reply({
