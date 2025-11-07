@@ -21,8 +21,8 @@ if (!TOKEN || !CLIENT_ID) {
   process.exit(1);
 }
 
-// ★ コマンドディレクトリを実構成に合わせて修正
-const commandsDir = join(__dirname, '..', 'commands');
+// ルート直下の commands/ を参照
+const commandsDir = join(__dirname, '..', 'src', 'commands');
 const commandFiles = readdirSync(commandsDir).filter(f => f.endsWith('.js'));
 
 const commands = [];
