@@ -233,7 +233,7 @@ if (interaction.isChatInputCommand()) {
     }
 
     // 追加 → モーダル
-    if (id === 'evui_add') {
+    if (id === 'ui_add') {
       const cfg = getGuildConfig(interaction.guildId);
       if (!cfg?.logChannelId) {
         await interaction.reply({ content: '⛔ 先に `/config setlogchannel` で「予定管理チャンネル」を設定してください。', ephemeral: true });
@@ -245,24 +245,24 @@ if (interaction.isChatInputCommand()) {
       }
 
       const modal = new ModalBuilder()
-        .setCustomId('evui_add_modal')
+        .setCustomId('ui_add_modal')
         .setTitle('予定を追加（JST）');
 
       const dateTime = new TextInputBuilder()
-        .setCustomId('evui_dt')
+        .setCustomId('ui_dt')
         .setLabel('【日付】yyyy-MM-dd HH:mm（空でもOK）')
         .setPlaceholder('例: 2025-11-06 19:00')
         .setStyle(TextInputStyle.Short)
         .setRequired(false);
 
       const scenario = new TextInputBuilder()
-        .setCustomId('evui_scenario')
+        .setCustomId('ui_scenario')
         .setLabel('【シナリオ名】（必須）')
         .setStyle(TextInputStyle.Short)
         .setRequired(true);
 
       const system = new TextInputBuilder()
-        .setCustomId('evui_system')
+        .setCustomId('ui_system')
         .setLabel('【システム名】（空でもOK）')
         .setStyle(TextInputStyle.Short)
         .setRequired(false);
@@ -278,7 +278,7 @@ if (interaction.isChatInputCommand()) {
     }
 
     // 一覧
-    if (id === 'evui_list') {
+    if (id === 'ui_list') {
       const events = loadEvents();
       const list = sortEventsForUI(events[interaction.guildId] ?? []);
       const me = interaction.user.id;
@@ -311,7 +311,7 @@ if (interaction.isChatInputCommand()) {
     }
 
     // 編集
-    if (id === 'evui_edit') {
+    if (id === 'ui_edit') {
       const events = loadEvents();
       const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
 
@@ -327,7 +327,7 @@ if (interaction.isChatInputCommand()) {
       });
 
       const select = new StringSelectMenuBuilder()
-        .setCustomId('evui_edit_select')
+        .setCustomId('ui_edit_select')
         .setPlaceholder('編集する予定を選択')
         .addOptions(options);
 
@@ -337,7 +337,7 @@ if (interaction.isChatInputCommand()) {
     }
 
     // 削除
-    if (id === 'evui_remove') {
+    if (id === 'ui_remove') {
       const events = loadEvents();
       const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
 
@@ -352,7 +352,7 @@ if (interaction.isChatInputCommand()) {
       });
 
       const select = new StringSelectMenuBuilder()
-        .setCustomId('evui_remove_select')
+        .setCustomId('ui_remove_select')
         .setPlaceholder('削除する予定を選択')
         .addOptions(options);
 
@@ -362,7 +362,7 @@ if (interaction.isChatInputCommand()) {
     }
 
     // 参加
-    if (id === 'evui_join') {
+    if (id === 'ui_join') {
       const events = loadEvents();
       const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
 
@@ -380,7 +380,7 @@ if (interaction.isChatInputCommand()) {
       });
 
       const select = new StringSelectMenuBuilder()
-        .setCustomId('evui_join_select')
+        .setCustomId('ui_join_select')
         .setPlaceholder('参加する予定を選択')
         .addOptions(options);
 
@@ -390,7 +390,7 @@ if (interaction.isChatInputCommand()) {
     }
 
     // 参加取消
-    if (id === 'evui_unjoin') {
+    if (id === 'ui_unjoin') {
       const me = interaction.user.id;
       const events = loadEvents();
       const listAll = sortEventsForUI(events[interaction.guildId] ?? []);
@@ -409,7 +409,7 @@ if (interaction.isChatInputCommand()) {
       });
 
       const select = new StringSelectMenuBuilder()
-        .setCustomId('evui_unjoin_select')
+        .setCustomId('ui_unjoin_select')
         .setPlaceholder('参加を取り消す予定を選択')
         .addOptions(options);
 
@@ -419,7 +419,7 @@ if (interaction.isChatInputCommand()) {
     }
 
     // 参加者を見る
-    if (id === 'evui_viewmembers') {
+    if (id === 'ui_viewmembers') {
       const events = loadEvents();
       const list = sortEventsForUI(events[interaction.guildId] ?? []).slice(0, 25);
 
@@ -437,7 +437,7 @@ if (interaction.isChatInputCommand()) {
       });
 
       const select = new StringSelectMenuBuilder()
-        .setCustomId('evui_viewmembers_select')
+        .setCustomId('ui_viewmembers_select')
         .setPlaceholder('参加者を確認する予定を選択')
         .addOptions(options);
 
@@ -452,7 +452,7 @@ if (interaction.isChatInputCommand()) {
   // Select Menu（確定ステップ）
   if (interaction.isStringSelectMenu()) {
     // 編集
-    if (interaction.customId === 'evui_edit_select') {
+    if (interaction.customId === 'ui_edit_select') {
       const id = interaction.values[0];
       const events = loadEvents();
       const arr = events[interaction.guildId] ?? [];
@@ -467,25 +467,25 @@ if (interaction.isChatInputCommand()) {
       const currentSystem = ev.systemName ?? '';
 
       const modal = new ModalBuilder()
-        .setCustomId(`evui_edit_modal:${id}`)
+        .setCustomId(`ui_edit_modal:${id}`)
         .setTitle('予定を編集（空でクリア可／シナリオ名空は不可）');
 
       const dateTime = new TextInputBuilder()
-        .setCustomId('evui_dt')
+        .setCustomId('ui_dt')
         .setLabel('【日付】yyyy-MM-dd HH:mm（空でクリア）')
         .setStyle(TextInputStyle.Short)
         .setRequired(false)
         .setValue(currentDt);
 
       const scenario = new TextInputBuilder()
-        .setCustomId('evui_scenario')
+        .setCustomId('ui_scenario')
         .setLabel('【シナリオ名】（空不可）')
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
         .setValue(currentScenario);
 
       const system = new TextInputBuilder()
-        .setCustomId('evui_system')
+        .setCustomId('ui_system')
         .setLabel('【システム名】（空でクリア）')
         .setStyle(TextInputStyle.Short)
         .setRequired(false)
@@ -502,7 +502,7 @@ if (interaction.isChatInputCommand()) {
     }
 
     // 削除
-    if (interaction.customId === 'evui_remove_select') {
+    if (interaction.customId === 'ui_remove_select') {
       await interaction.deferReply({ ephemeral: true });
       const id = interaction.values[0];
       const events = loadEvents();
@@ -523,7 +523,7 @@ if (interaction.isChatInputCommand()) {
     }
 
     // 参加確定
-    if (interaction.customId === 'evui_join_select') {
+    if (interaction.customId === 'ui_join_select') {
       await interaction.deferReply({ ephemeral: true });
       const id = interaction.values[0];
       const me = interaction.user.id;
@@ -553,7 +553,7 @@ if (interaction.isChatInputCommand()) {
     }
 
     // 参加取消確定
-    if (interaction.customId === 'evui_unjoin_select') {
+    if (interaction.customId === 'ui_unjoin_select') {
       await interaction.deferReply({ ephemeral: true });
       const id = interaction.values[0];
       const me = interaction.user.id;
@@ -579,7 +579,7 @@ if (interaction.isChatInputCommand()) {
     }
 
     // 参加者を見る
-    if (interaction.customId === 'evui_viewmembers_select') {
+    if (interaction.customId === 'ui_viewmembers_select') {
       await interaction.deferReply({ ephemeral: true });
       const id = interaction.values[0];
       const me = interaction.user.id;
