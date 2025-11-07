@@ -19,9 +19,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ZONE = 'Asia/Tokyo';
 
-
-
-
 // GuildMembers は不要運用（必要なら有効化）
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -30,7 +27,6 @@ client.on('warn', (m) => console.warn('[warn]', m));
 client.on('error', (e) => console.error('[error]', e));
 process.on('unhandledRejection', (r) => console.error('[unhandledRejection]', r));
 process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
-
 
 // コマンド読み込み
 client.commands = new Collection();
@@ -93,17 +89,17 @@ function ensureParticipants(ev) {
 function slugifyName(name) {
   return name
     .toLowerCase()
-    .replace(/[\s　]+/g, '-')           
-    .replace(/[^\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}0-9a-z-_]/giu, '-') 
-    .replace(/-+/g, '-')                
-    .replace(/^-|-$/g, '')              
-    .slice(0, 90);                      
+    .replace(/[\s　]+/g, '-')
+    .replace(/[^\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}0-9a-z-_]/giu, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 90);
 }
 async function createPrivateChannelForScenario(interaction, scenarioName, createdByUserId, categoryId) {
   const base = slugifyName(scenarioName) || 'scenario';
   const parent = await interaction.guild.channels.fetch(categoryId).catch(() => null);
   if (!parent || parent.type !== ChannelType.GuildCategory) {
-    throw new Error('カテゴリが無効です。/event config_setcategory で正しいカテゴリを設定してください。');
+    throw new Error('カテゴリが無効です。/eventadmin config_setcategory で正しいカテゴリを設定してください。');
   }
 
   const siblings = parent.children?.cache ?? (await interaction.guild.channels.fetch()).filter(ch => ch.parentId === parent.id);
@@ -187,6 +183,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       console.log(`${base} → OTHER INTERACTION`);
     }
   } catch {}
+
   // Slash Command
   if (interaction.isChatInputCommand()) {
     const cmd = client.commands.get(interaction.commandName);
@@ -213,7 +210,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await cmd.execute(interaction);
     } catch (err) {
       console.error(err);
-      // 既にACK済みなら followUp、未ACKなら reply。どちらも失敗しても落とさない。
       if (interaction.deferred || interaction.replied) {
         await interaction.followUp({ content: '⚠️ コマンド実行中にエラーが発生しました。', ephemeral: true }).catch(() => {});
       } else {
@@ -240,7 +236,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const has = member.roles.cache.has(role.id);
         if (has) await member.roles.remove(role.id);
         else     await member.roles.add(role.id);
-  
+
         await interaction.editReply({ content: has ? `🔻 <@&${role.id}> を外しました。` : `🔺 <@&${role.id}> を付与しました。` });
       } catch (e) {
         console.error('[rolebtn]', e);
@@ -253,11 +249,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (id === 'evui_add') {
       const cfg = getGuildConfig(interaction.guildId);
       if (!cfg?.logChannelId) {
-        await interaction.reply({ content: '⛔ 先に `/event config_setlogchannel` で「予定管理チャンネル」を設定してください。', ephemeral: true });
+        await interaction.reply({ content: '⛔ 先に `/eventadmin config_setlogchannel` で「予定管理チャンネル」を設定してください。', ephemeral: true });
         return;
       }
       if (!cfg?.eventCategoryId) {
-        await interaction.reply({ content: '⛔ 先に `/event config_setcategory` で「シナリオ用カテゴリ」を設定してください。', ephemeral: true });
+        await interaction.reply({ content: '⛔ 先に `/eventadmin config_setcategory` で「シナリオ用カテゴリ」を設定してください。', ephemeral: true });
         return;
       }
 
@@ -557,7 +553,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (ev.privateChannelId) {
         await grantAccessToPrivateChannel(interaction.guild, ev.privateChannelId, me);
-        // 参加ログをシナリオ用chにも投稿
         try {
           const ch = await interaction.guild.channels.fetch(ev.privateChannelId);
           await ch?.send(`🙋 <@${me}> さんが参加しました。`);
@@ -656,7 +651,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const cfg = getGuildConfig(interaction.guildId);
       if (!cfg?.logChannelId || !cfg?.eventCategoryId) {
-        await interaction.editReply({ content: '⛔ 先に `/event config_setlogchannel` と `/event config_setcategory` を設定してください。' });
+        await interaction.editReply({ content: '⛔ 先に `/eventadmin config_setlogchannel` と `/eventadmin config_setcategory` を設定してください。' });
         return;
       }
       if (!scenarioName.length) {
