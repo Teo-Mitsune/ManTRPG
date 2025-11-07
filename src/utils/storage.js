@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS app_configs (
 // ---------- メモリキャッシュ ----------
 let cacheEvents = {};   // { [guildId]: Event[] }
 let cacheGConfigs = {}; // { [guildId]: { logChannelId, eventCategoryId } }
-let cacheAppCfg = {};   // { [guildId]: { rolesPanel?: { channelId, messageId, roles: { [roleId]: {label?:string, emoji?:string} } } } }
+let cacheAppCfg = {};   // { [guildId]: { rolesPanel?: {...} } }
 let inited = false;
 
 const clone = (o) => JSON.parse(JSON.stringify(o ?? {}));
@@ -117,7 +117,13 @@ async function loadAllFromDB() {
     client.release();
   }
 }
-await loadAllFromDB();
+
+// ★ モジュール読込時にDBへ即アクセスしないようにする
+export async function initStorage() {
+  if (!inited) {
+    await loadAllFromDB();
+  }
+}
 
 // ---------- 公開API（既存互換） ----------
 export function makeId(bytes = 6) {
@@ -150,6 +156,13 @@ export function setGuildConfig(guildId, patch) {
     eventCategoryId: (Object.prototype.hasOwnProperty.call(patch, 'eventCategoryId') ? patch.eventCategoryId : cur.eventCategoryId) ?? null
   };
   cacheGConfigs[guildId] = next;
+
+  // reset 的な利用時の安全性を高める
+  if (next.logChannelId === null && next.eventCategoryId === null) {
+    // 完全初期化に近い意図 → キャッシュも空にしておく
+    delete cacheGConfigs[guildId];
+  }
+
   void persistGuildConfigToDB(guildId, next).catch(e =>
     console.error('[storage] persist guild_config failed:', e)
   );
@@ -157,24 +170,20 @@ export function setGuildConfig(guildId, patch) {
 }
 
 // --- app_configs（roles.js互換API） ---
-/** 旧roles.jsが使う全体設定オブジェクトを返す（同期・キャッシュ） */
 export function loadConfig() {
   return clone(cacheAppCfg);
 }
-/** 全体設定オブジェクトを保存（同期キャッシュ更新 → 非同期でDB全置換） */
 export function saveConfig(obj) {
   cacheAppCfg = clone(obj ?? {});
   void persistAppConfigToDB(cacheAppCfg).catch(e =>
     console.error('[storage] persist app_config failed:', e)
   );
 }
-/** roles.jsが使う {guildId}.rolesPanel を必ず用意 */
 export function ensureRolesPanelConfig(cfgObj, guildId) {
   if (!cfgObj[guildId]) cfgObj[guildId] = {};
   if (!cfgObj[guildId].rolesPanel) {
     cfgObj[guildId].rolesPanel = { channelId: null, messageId: null, roles: {} };
   } else {
-    // 欠損を補完
     cfgObj[guildId].rolesPanel.channelId ??= null;
     cfgObj[guildId].rolesPanel.messageId ??= null;
     cfgObj[guildId].rolesPanel.roles ??= {};

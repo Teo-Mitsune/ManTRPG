@@ -1,3 +1,4 @@
+// src/scheduler.js
 import { DateTime } from 'luxon';
 import { loadEvents, saveEvents, getGuildConfig } from './utils/storage.js';
 
@@ -27,7 +28,9 @@ export function startScheduler(client) {
           const when = DateTime.fromISO(ev.datetimeUTC);
           if (!when.isValid) continue;
 
-          if (when <= nowUTC && nowUTC.diff(when, 'seconds').seconds <= 60) {
+          // ★ 再起動救済: 開始から1時間以内なら拾う
+          const diffSec = nowUTC.diff(when, 'seconds').seconds;
+          if (when <= nowUTC && diffSec >= 0 && diffSec <= 3600) {
             try {
               const guild = await client.guilds.fetch(guildId);
               const channel = await guild.channels.fetch(channelId);

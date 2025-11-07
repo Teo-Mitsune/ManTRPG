@@ -1,13 +1,13 @@
 {
     "name": "ManTRPG",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "private": true,
     "type": "module",
     "engines": {
         "node": ">=20"
     },
     "scripts": {
-        "dev": "node src/index.js",
+        "dev": "node --watch src/index.js",
         "deploy:cmd": "node scripts/deploy-commands.js",
         "start": "node src/index.js"
     },

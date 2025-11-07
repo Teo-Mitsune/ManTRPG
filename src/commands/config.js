@@ -4,7 +4,7 @@ import {
   ChannelType,
   PermissionFlagsBits
 } from 'discord.js';
-import { getGuildConfig, setGuildConfig } from '../utils/storage.js';
+import { getGuildConfig, setGuildConfig } from '../src/utils/storage.js';
 
 export const command = {
   data: new SlashCommandBuilder()

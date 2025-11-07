@@ -5,11 +5,11 @@ export const command = {
   data: new SlashCommandBuilder()
     .setName('ui')
     .setDescription('TRPGセッション募集・参加UIを開く')
-    .setDefaultMemberPermissions(0)   // 全員OK
+    .setDefaultMemberPermissions(0)
     .setDMPermission(false),
 
   async execute(interaction) {
-    // index.js 側で /ui をハンドリングするよう変更してください
+    // index.js 側で /ui をハンドリングするよう変更済み
     await interaction.reply({
       content: '📋 予定パネルを開きます…',
       ephemeral: true
