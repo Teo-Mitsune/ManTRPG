@@ -97,7 +97,7 @@ async function createPrivateChannelForScenario(interaction, scenarioName, create
   const base = slugifyName(scenarioName) || 'scenario';
   const parent = await interaction.guild.channels.fetch(categoryId).catch(() => null);
   if (!parent || parent.type !== ChannelType.GuildCategory) {
-    throw new Error('カテゴリが無効です。/eventadmin config_setcategory で正しいカテゴリを設定してください。');
+    throw new Error('カテゴリが無効です。/config setcategory で正しいカテゴリを設定してください。');
   }
   const siblings = parent.children?.cache ?? (await interaction.guild.channels.fetch()).filter(ch => ch.parentId === parent.id);
   let name = base; let i = 2;
@@ -157,8 +157,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const cmd = client.commands.get(interaction.commandName);
     if (!cmd) return;
 
-    // /event ui → GUIパネル
-    if (interaction.commandName === 'event' && interaction.options.getSubcommand(false) === 'ui') {
+    // /ui → GUIパネル
+    if (interaction.commandName === 'ui') {
       const row1 = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('evui_add').setLabel('予定を追加').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('evui_list').setLabel('予定一覧').setStyle(ButtonStyle.Secondary),
@@ -213,11 +213,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (id === 'evui_add') {
       const cfg = getGuildConfig(interaction.guildId);
       if (!cfg?.logChannelId) {
-        await interaction.reply({ content: '⛔ 先に `/eventadmin config_setlogchannel` で「予定管理チャンネル」を設定してください。', ephemeral: true });
+        await interaction.reply({ content: '⛔ 先に `/config setlogchannel` で「予定管理チャンネル」を設定してください。', ephemeral: true });
         return;
       }
       if (!cfg?.eventCategoryId) {
-        await interaction.reply({ content: '⛔ 先に `/eventadmin config_setcategory` で「シナリオ用カテゴリ」を設定してください。', ephemeral: true });
+        await interaction.reply({ content: '⛔ 先に `/config setcategory` で「シナリオ用カテゴリ」を設定してください。', ephemeral: true });
         return;
       }
 
