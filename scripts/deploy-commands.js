@@ -5,6 +5,10 @@ import { readdirSync } from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, join } from 'path';
 
+if (!process.env.DATABASE_URL) {
+  process.env.DATABASE_URL = 'dummy-for-command-deploy';
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
