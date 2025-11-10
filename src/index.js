@@ -823,6 +823,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // 掲示板を更新（最新版1件維持）
         await updateEventBoardMessage(interaction.client, interaction.guildId);
 
+        await postToLogChannel(interaction.client, interaction.guildId, [
+          '🗓️ **予定追加**',
+          `【日付】${isoUTC ? DateTime.fromISO(isoUTC).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') + ' (JST)' : '未設定'}`,
+          `【シナリオ名】${scenario}`,
+          `【システム名】${system || '未設定'}`,
+          `【GM名】<@${interaction.user.id}>`,
+          `【部屋】<#${privateChannelId}>`,
+          `ID:\`${ev.id}\``
+        ].join('\n'));
+
 
 
         // 作成者へエフェメラル返信
