@@ -78,10 +78,36 @@ async function postToLogChannel(client, guildId, content) {
   try {
     const { getGuildConfig } = await import('./utils/storage.js');
     const cfg = getGuildConfig(guildId);
-    if (!cfg?.logChannelId) return;
-    const ch = await client.channels.fetch(cfg.logChannelId).catch(() => null);
-    if (!ch?.isTextBased()) return;
+    console.log('[log] cfg.logChannelId =', cfg?.logChannelId);
+
+    if (!cfg?.logChannelId) {
+      console.warn('[log] skip: logChannelId not set');
+      return;
+    }
+
+    const ch = await client.channels.fetch(cfg.logChannelId).catch((e) => {
+      console.error('[log] fetch error:', e);
+      return null;
+    });
+    if (!ch) {
+      console.error('[log] channel not found:', cfg.logChannelId);
+      return;
+    }
+
+    // 送信できない種類（Forumなど）は早期に注意
+    // 送信可能: GuildText / PublicThread / PrivateThread / Announcement(News)
+    const nonPostableTypes = ['GUILD_FORUM'];
+    if (nonPostableTypes.includes(ch.type)) {
+      console.error('[log] channel type not postable:', ch.type, ch.id);
+      return;
+    }
+    if (!ch.isTextBased?.()) {
+      console.error('[log] channel is not text-based:', ch.type, ch.id);
+      return;
+    }
+
     await ch.send({ content });
+    console.log('[log] posted to', ch.id);
   } catch (e) {
     console.error('[log] failed to post:', e);
   }
