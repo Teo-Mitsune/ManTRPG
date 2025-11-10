@@ -1,136 +1,206 @@
 // src/utils/storage.js
-import { Pool } from 'pg';
+// PostgreSQL 永続化対応 + メモリキャッシュ
+// （events, guild_configs, app_configs を永続化）
 
+import crypto from 'crypto';
+import pg from 'pg';
+const { Pool } = pg;
+
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+  throw new Error('DATABASE_URL is not set. Please define it in .env');
+}
+
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// ---------- スキーマ ----------
+const initSQL = `
+CREATE TABLE IF NOT EXISTS guild_configs (
+  guild_id TEXT PRIMARY KEY,
+  log_channel_id TEXT,
+  event_category_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS events (
+  id TEXT PRIMARY KEY,
+  guild_id TEXT NOT NULL,
+  datetime_utc TIMESTAMPTZ NULL,
+  scenario_name TEXT NOT NULL,
+  system_name TEXT NULL,
+  created_by TEXT NOT NULL,
+  notified BOOLEAN NOT NULL DEFAULT FALSE,
+  private_channel_id TEXT NULL
+);
+
+CREATE TABLE IF NOT EXISTS participants (
+  event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL,
+  PRIMARY KEY (event_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_guild ON events(guild_id);
+CREATE INDEX IF NOT EXISTS idx_participants_event ON participants(event_id);
+
+CREATE TABLE IF NOT EXISTS app_configs (
+  guild_id TEXT PRIMARY KEY,
+  data JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+`;
+
+// ---------- メモリキャッシュ ----------
+let cacheEvents = {};
+let cacheGConfigs = {};
+let cacheAppCfg = {};
+let inited = false;
+const clone = (o) => JSON.parse(JSON.stringify(o ?? {}));
+
+// ---------- 初期ロード ----------
+export async function restoreFromDB() {
+  const client = await pool.connect();
+  try {
+    await client.query(initSQL);
+
+    const cfg = await client.query('SELECT * FROM guild_configs');
+    cacheGConfigs = {};
+    for (const r of cfg.rows) {
+      cacheGConfigs[r.guild_id] = {
+        logChannelId: r.log_channel_id ?? null,
+        eventCategoryId: r.event_category_id ?? null
+      };
+    }
+
+    const evRes = await client.query('SELECT * FROM events');
+    const paRes = await client.query('SELECT * FROM participants');
+    const pmap = new Map();
+    for (const p of paRes.rows) {
+      if (!pmap.has(p.event_id)) pmap.set(p.event_id, []);
+      pmap.get(p.event_id).push(p.user_id);
+    }
+    cacheEvents = {};
+    for (const e of evRes.rows) {
+      const ev = {
+        id: e.id,
+        datetimeUTC: e.datetime_utc ? e.datetime_utc.toISOString() : null,
+        scenarioName: e.scenario_name,
+        systemName: e.system_name,
+        createdBy: e.created_by,
+        participants: pmap.get(e.id) ?? [],
+        notified: !!e.notified,
+        privateChannelId: e.private_channel_id
+      };
+      if (!cacheEvents[e.guild_id]) cacheEvents[e.guild_id] = [];
+      cacheEvents[e.guild_id].push(ev);
+    }
+
+    const app = await client.query('SELECT guild_id, data FROM app_configs');
+    cacheAppCfg = {};
+    for (const r of app.rows) {
+      cacheAppCfg[r.guild_id] = r.data ?? {};
+    }
+
+    inited = true;
+    console.log('[storage] DB restored: guilds=%d', Object.keys(cacheEvents).length);
+  } finally {
+    client.release();
+  }
+}
+
+// ---------- 公開API ----------
+export function makeId(bytes = 6) {
+  return crypto.randomBytes(bytes).toString('hex');
+}
+
+export function loadEvents() {
+  return clone(cacheEvents);
+}
+
+export function saveEvents(obj) {
+  cacheEvents = clone(obj ?? {});
+  void persistEventsToDB(cacheEvents).catch(e =>
+    console.error('[storage] persist events failed:', e)
+  );
+}
+
+export function ensureGuildBucket(eventsObj, guildId) {
+  if (!eventsObj[guildId]) eventsObj[guildId] = [];
+  return eventsObj;
+}
+
+export function getGuildConfig(guildId) {
+  return clone(cacheGConfigs[guildId] ?? { logChannelId: null, eventCategoryId: null });
+}
+
+export function setGuildConfig(guildId, partial) {
+  const cur = cacheGConfigs[guildId] ?? { logChannelId: null, eventCategoryId: null };
+  const next = {
+    logChannelId: partial.logChannelId ?? cur.logChannelId ?? null,
+    eventCategoryId: partial.eventCategoryId ?? cur.eventCategoryId ?? null
+  };
+  cacheGConfigs[guildId] = next;
+  void persistGuildConfigToDB(guildId, next).catch(e =>
+    console.error('[storage] persist guild_config failed:', e)
+  );
+  return clone(next);
+}
+
+// app_configs (roles.js互換)
+export function loadConfig() {
+  return clone(cacheAppCfg);
+}
+export function saveConfig(obj) {
+  cacheAppCfg = clone(obj ?? {});
+  void persistAppConfigToDB(cacheAppCfg).catch(e =>
+    console.error('[storage] persist app_config failed:', e)
+  );
+}
 export function ensureRolesPanelConfig(appCfg, guildId) {
-  // ルートにギルド用の入れ物を用意
   appCfg[guildId] ??= {};
-
-  // 互換のため rolesPanel を初期化
   const panel = appCfg[guildId].rolesPanel ?? {
     channelId: null,
     messageId: null,
     buttons: []
   };
-
-  // buttons が配列であることを保証
-  if (!Array.isArray(panel.buttons)) {
-    panel.buttons = [];
-  }
-
-  // 反映して返却
+  if (!Array.isArray(panel.buttons)) panel.buttons = [];
   appCfg[guildId].rolesPanel = panel;
   return panel;
 }
 
-// ---- DB 接続（DATABASE_URL が無ければメモリのみで動作）----
-const hasDB = !!process.env.DATABASE_URL;
-const pool = hasDB
-  ? new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false },
-    })
-  : null;
-
-// ---- メモリ上のキャッシュ（既存コード互換: オブジェクト参照を使い回す）----
-const MEM = {
-  events: {}, // { [guildId]: Array<event> }
-  config: {}, // { [guildId]: { ... } }
-};
-
-// ---- 起動時に呼び出して DB -> MEM を復元 ----
-export async function restoreFromDB() {
-  if (!pool) {
-    console.warn('[storage] DB なしで起動（メモリ永続のみ）');
-    return;
-  }
-  await ensureTables();
-  const { rows } = await pool.query('SELECT guild_id, events, config FROM app_state');
-  MEM.events = {};
-  MEM.config = {};
-  for (const r of rows) {
-    // events は { [guildId]: [] } 形式で保存しているので吸い出す
-    const ev = r.events && typeof r.events === 'object'
-      ? (r.events[r.guild_id] ?? [])
-      : [];
-    MEM.events[r.guild_id] = ev;
-
-    const cfg = r.config && typeof r.config === 'object'
-      ? (r.config[r.guild_id] ?? r.config)
-      : {};
-    MEM.config[r.guild_id] = cfg;
-  }
-  console.log('[storage] restored from DB. guilds=', rows.length);
-}
-
-// ---- 既存コードが使う同期的 API（内部で DB 書き込みは fire-and-forget）----
-export function loadEvents() {
-  return MEM.events; // 参照を返す（既存コード互換）
-}
-export function ensureGuildBucket(allEvents, guildId) {
-  if (!allEvents[guildId]) allEvents[guildId] = [];
-}
-export function makeId(n = 7) {
-  const s = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  let r = '';
-  for (let i = 0; i < n; i++) r += s[Math.floor(Math.random() * s.length)];
-  return r;
-}
-
-export function saveEvents(allEvents) {
-  // MEM を置き換えるのではなく、中身を同期させる（参照維持）
-  MEM.events = allEvents;
-
-  // DB があればバックグラウンドで書き込み
-  if (!pool) return;
-  void persistAllEvents(allEvents).catch((e) =>
-    console.error('[storage] persistAllEvents error', e)
-  );
-}
-
-export function getGuildConfig(guildId) {
-  return MEM.config[guildId] ?? null;
-}
-export function loadConfig() {
-  return MEM.config; // 参照を返す
-}
-export function saveConfig(cfg) {
-  MEM.config = cfg;
-  if (!pool) return;
-  void persistAllConfig(cfg).catch((e) =>
-    console.error('[storage] persistAllConfig error', e)
-  );
-}
-
-// ---- 内部：テーブル作成 ----
-async function ensureTables() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS app_state (
-      guild_id TEXT PRIMARY KEY,
-      events   JSONB NOT NULL DEFAULT '{}'::jsonb,
-      config   JSONB NOT NULL DEFAULT '{}'::jsonb
-    );
-  `);
-}
-
-// ---- 内部：全 guild の events を upsert ----
-async function persistAllEvents(allEvents) {
+// ---------- 内部永続化 ----------
+async function persistEventsToDB(all) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const guildIds = Object.keys(allEvents);
-    for (const gid of guildIds) {
-      const arr = allEvents[gid] ?? [];
-      // { [gid]: [...] } 形式で保存（復元時に同じ形で吸い出す）
-      const payload = { [gid]: arr };
-      await client.query(
-        `
-        INSERT INTO app_state (guild_id, events, config)
-        VALUES ($1, $2, COALESCE((SELECT config FROM app_state WHERE guild_id=$1),'{}'::jsonb))
-        ON CONFLICT (guild_id)
-        DO UPDATE SET events = EXCLUDED.events
-        `,
-        [gid, payload]
-      );
+    await client.query('DELETE FROM participants');
+    await client.query('DELETE FROM events');
+
+    const evInsert = `
+      INSERT INTO events
+        (id, guild_id, datetime_utc, scenario_name, system_name, created_by, notified, private_channel_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    `;
+    const paInsert = `INSERT INTO participants (event_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`;
+
+    for (const gid of Object.keys(all ?? {})) {
+      const arr = Array.isArray(all[gid]) ? all[gid] : [];
+      for (const ev of arr) {
+        await client.query(evInsert, [
+          ev.id,
+          gid,
+          ev.datetimeUTC ? new Date(ev.datetimeUTC) : null,
+          ev.scenarioName ?? '',
+          ev.systemName ?? null,
+          ev.createdBy ?? 'unknown',
+          !!ev.notified,
+          ev.privateChannelId ?? null
+        ]);
+        const ps = Array.isArray(ev.participants) ? ev.participants : [];
+        for (const uid of ps) {
+          await client.query(paInsert, [ev.id, uid]);
+        }
+      }
     }
     await client.query('COMMIT');
   } catch (e) {
@@ -141,23 +211,29 @@ async function persistAllEvents(allEvents) {
   }
 }
 
-// ---- 内部：全 guild の config を upsert ----
-async function persistAllConfig(cfg) {
+async function persistGuildConfigToDB(guildId, cfg) {
+  const upsert = `
+    INSERT INTO guild_configs (guild_id, log_channel_id, event_category_id)
+    VALUES ($1,$2,$3)
+    ON CONFLICT (guild_id)
+    DO UPDATE SET log_channel_id = EXCLUDED.log_channel_id,
+                  event_category_id = EXCLUDED.event_category_id
+  `;
+  await pool.query(upsert, [guildId, cfg.logChannelId, cfg.eventCategoryId]);
+}
+
+async function persistAppConfigToDB(all) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const guildIds = Object.keys(cfg);
-    for (const gid of guildIds) {
-      const payload = { [gid]: cfg[gid] ?? {} };
-      await client.query(
-        `
-        INSERT INTO app_state (guild_id, config, events)
-        VALUES ($1, $2, COALESCE((SELECT events FROM app_state WHERE guild_id=$1),'{}'::jsonb))
-        ON CONFLICT (guild_id)
-        DO UPDATE SET config = EXCLUDED.config
-        `,
-        [gid, payload]
-      );
+    const upsert = `
+      INSERT INTO app_configs (guild_id, data)
+      VALUES ($1, $2::jsonb)
+      ON CONFLICT (guild_id)
+      DO UPDATE SET data = EXCLUDED.data
+    `;
+    for (const gid of Object.keys(all ?? {})) {
+      await client.query(upsert, [gid, JSON.stringify(all[gid] ?? {})]);
     }
     await client.query('COMMIT');
   } catch (e) {
