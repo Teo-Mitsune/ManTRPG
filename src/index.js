@@ -13,7 +13,8 @@ import { DateTime } from 'luxon';
 import { startScheduler } from './scheduler.js';
 import {
   loadEvents, saveEvents, ensureGuildBucket, makeId,
-  getGuildConfig
+  getGuildConfig,
+  restoreFromDB
 } from './utils/storage.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -51,8 +52,27 @@ client.commands = new Collection();
   console.log('[loaded commands]', [...client.commands.keys()]);
 }
 
-client.once(Events.ClientReady, (c) => {
+client.once(Events.ClientReady, async (c) => {
   console.log(`✅ Logged in as ${c.user.tag}`);
+
+  // ★ ここから：Neonから復元 → ギルドごとに掲示板メッセージを再構成
+  try {
+    await restoreFromDB(); // Neon -> メモリへ（events/config など）
+    console.log('[boot] restored state from Neon');
+
+    // 参加している全ギルドの掲示板（eventBoard）を最新化
+    for (const [guildId] of client.guilds.cache) {
+      try {
+        await updateEventBoardMessage(client, guildId);
+      } catch (e) {
+        console.error('[boot] board update failed for guild', guildId, e);
+      }
+    }
+  } catch (e) {
+    console.error('[boot] restoreFromDB failed:', e);
+  }
+  // ★ ここまで
+
   startScheduler(client);
 });
 
