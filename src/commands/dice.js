@@ -13,16 +13,18 @@ export const command = {
     ),
 
   async execute(interaction) {
-    await interaction.deferReply();
-
     try {
       const inputRaw = interaction.options.getString('roll');
       const input = (inputRaw?.trim() || '1d100').toLowerCase();
 
-      // XdY+Z（修飾子ありも許可）
+      // 形式: XdY(+/-Z)
       const m = input.match(/^(\d*)d(\d+)([+-]\d+)?$/i);
       if (!m) {
-        return interaction.editReply('⚠️ 正しい形式で指定してください（例: `1d100`, `3d6+2`, `2d10-1`）');
+        await interaction.reply({
+          content: '⚠️ 正しい形式で指定してください（例: `1d100`, `3d6+2`, `2d10-1`）',
+          ephemeral: true
+        });
+        return;
       }
 
       const count = parseInt(m[1] || '1', 10);
@@ -31,30 +33,44 @@ export const command = {
 
       // 制限
       if (count < 1 || sides < 1) {
-        return interaction.editReply('⚠️ 数値は1以上を指定してください。');
+        await interaction.reply({ content: '⚠️ 数値は1以上を指定してください。', ephemeral: true });
+        return;
       }
       if (count > 100) {
-        return interaction.editReply('⚠️ ダイスの個数は最大100個までです。');
+        await interaction.reply({ content: '⚠️ ダイスの個数は最大100個までです。', ephemeral: true });
+        return;
       }
       if (sides > 1000) {
-        return interaction.editReply('⚠️ ダイスの面数は最大1000までです。');
+        await interaction.reply({ content: '⚠️ ダイスの面数は最大1000までです。', ephemeral: true });
+        return;
       }
 
-      // 振る
+      // ロール
       const rolls = Array.from({ length: count }, () => Math.floor(Math.random() * sides) + 1);
       const sum = rolls.reduce((a, b) => a + b, 0);
       const total = sum + modifier;
 
-      // 出力
-      const display =
-        modifier !== 0
-          ? `🎲 <@${interaction.user.id}> → ${count}d${sides}${modifier >= 0 ? `+${modifier}` : modifier}\n出目: [${rolls.join(', ')}] ${modifier >= 0 ? `+ ${modifier}` : `- ${Math.abs(modifier)}`}\n合計: **${total}**`
-          : `🎲 <@${interaction.user.id}> → ${count}d${sides}\n出目: [${rolls.join(', ')}]\n合計: **${total}**`;
+      // 表示名（メンションはしない）
+      const who = interaction.member?.displayName ?? interaction.user.username;
 
-      await interaction.editReply(display);
+      // 出力整形
+      const expr = `${count}d${sides}${modifier ? (modifier > 0 ? `+${modifier}` : `${modifier}`) : ''}`;
+      const modText = modifier ? (modifier > 0 ? ` + ${modifier}` : ` - ${Math.abs(modifier)}`) : '';
+      const display =
+        `🎲 @${who} → ${expr}\n` +
+        `出目: [${rolls.join(', ')}]${modText}\n` +
+        `合計: **${total}**`;
+
+      // 即時返信（deferReplyは使わない）
+      await interaction.reply(display);
     } catch (err) {
       console.error('[dice]', err);
-      await interaction.editReply('⚠️ ダイス処理中にエラーが発生しました。');
+      // まだ未返信なら reply、既に返信済みなら followUp
+      try {
+        await interaction.reply('⚠️ ダイス処理中にエラーが発生しました。');
+      } catch {
+        await interaction.followUp('⚠️ ダイス処理中にエラーが発生しました。');
+      }
     }
   }
 };
