@@ -108,7 +108,6 @@ async function postToLogChannel(client, guildId, content) {
   }
 }
 
-
 // ---- 掲示板（最新版1件のみ維持） ----
 async function composeBoardContent(guildId) {
   const eventsAll = loadEvents();
@@ -179,7 +178,6 @@ async function updateEventBoardMessage(client, guildId) {
     console.error('[board] update failed:', e);
   }
 }
-
 
 function formatJST(isoUtc) {
   return isoUtc ? DateTime.fromISO(isoUtc).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') : null;
@@ -405,11 +403,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ActionRowBuilder().addComponents(system),
       );
 
-
       await interaction.showModal(modal);
       return;
     }
-
 
     // 編集対象選択
     if (id === 'ui_edit') {
@@ -625,7 +621,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       saveEvents(events);
       await updateEventBoardMessage(interaction.client, interaction.guildId);
 
-
       await interaction.editReply({
         content: `🗑️ 削除しました：\n${linesForEvent(removed).join('\n')}\nID:\`${removed.id}\``
       });
@@ -648,7 +643,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!ev.participants.includes(me)) ev.participants.push(me);
       saveEvents(events);
       await updateEventBoardMessage(interaction.client, interaction.guildId);
-
 
       if (ev.privateChannelId) {
         await grantAccessToPrivateChannel(interaction.guild, ev.privateChannelId, me);
@@ -680,7 +674,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       ev.participants = ev.participants.filter(u => u !== me);
       saveEvents(events);
       await updateEventBoardMessage(interaction.client, interaction.guildId);
-
 
       if (ev.privateChannelId && ev.createdBy !== me) {
         await revokeAccessFromPrivateChannel(interaction.guild, ev.privateChannelId, me);
@@ -747,7 +740,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // ----- Modal Submit -----
+  // ----- Modal Submit ----- (唯一のモーダル処理ブロック)
   if (interaction.isModalSubmit()) {
     const id = interaction.customId;
 
@@ -805,11 +798,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         events[interaction.guildId].push(ev);
         saveEvents(events);
 
-
-
         // 掲示板を更新（最新版1件維持）
         await updateEventBoardMessage(interaction.client, interaction.guildId);
 
+        // ログチャンネル通知
         await postToLogChannel(interaction.client, interaction.guildId, [
           '🗓️ **予定追加**',
           `【日付】${isoUTC ? DateTime.fromISO(isoUTC).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') + ' (JST)' : '未設定'}`,
@@ -819,8 +811,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           `【部屋】<#${privateChannelId}>`,
           `ID:\`${ev.id}\``
         ].join('\n'));
-
-
 
         // 作成者へエフェメラル返信
         await interaction.reply({
@@ -845,8 +835,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       return;
     }
-  }
-
 
     // 予定 編集（customId: ui_edit_modal:<eventId>）
     if (id.startsWith('ui_edit_modal:')) {
@@ -883,8 +871,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         ev.scenarioName = scenario;                // 必須
         ev.systemName = system ? system : null;    // 空ならクリア
         saveEvents(events);
-        await updateEventBoardMessage(interaction.client, interaction.guildId);
 
+        // 掲示板更新
+        await updateEventBoardMessage(interaction.client, interaction.guildId);
 
         await interaction.reply({
           content: [
