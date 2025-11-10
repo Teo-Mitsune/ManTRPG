@@ -1,6 +1,27 @@
 // src/utils/storage.js
 import { Pool } from 'pg';
 
+export function ensureRolesPanelConfig(appCfg, guildId) {
+  // ルートにギルド用の入れ物を用意
+  appCfg[guildId] ??= {};
+
+  // 互換のため rolesPanel を初期化
+  const panel = appCfg[guildId].rolesPanel ?? {
+    channelId: null,
+    messageId: null,
+    buttons: []
+  };
+
+  // buttons が配列であることを保証
+  if (!Array.isArray(panel.buttons)) {
+    panel.buttons = [];
+  }
+
+  // 反映して返却
+  appCfg[guildId].rolesPanel = panel;
+  return panel;
+}
+
 // ---- DB 接続（DATABASE_URL が無ければメモリのみで動作）----
 const hasDB = !!process.env.DATABASE_URL;
 const pool = hasDB
