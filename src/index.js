@@ -78,36 +78,31 @@ async function postToLogChannel(client, guildId, content) {
   try {
     const { getGuildConfig } = await import('./utils/storage.js');
     const cfg = getGuildConfig(guildId);
-    console.log('[log] cfg.logChannelId =', cfg?.logChannelId);
 
     if (!cfg?.logChannelId) {
-      console.warn('[log] skip: logChannelId not set');
+      console.warn('[log] skip: logChannelId not set for guild', guildId);
       return;
     }
 
+    console.log('[log] trying to post to', cfg.logChannelId, 'guild', guildId);
+
     const ch = await client.channels.fetch(cfg.logChannelId).catch((e) => {
-      console.error('[log] fetch error:', e);
+      console.error('[log] fetch channel failed:', e);
       return null;
     });
+
     if (!ch) {
       console.error('[log] channel not found:', cfg.logChannelId);
       return;
     }
 
-    // 送信できない種類（Forumなど）は早期に注意
-    // 送信可能: GuildText / PublicThread / PrivateThread / Announcement(News)
-    const nonPostableTypes = ['GUILD_FORUM'];
-    if (nonPostableTypes.includes(ch.type)) {
-      console.error('[log] channel type not postable:', ch.type, ch.id);
-      return;
-    }
-    if (!ch.isTextBased?.()) {
-      console.error('[log] channel is not text-based:', ch.type, ch.id);
+    if (!ch.isTextBased()) {
+      console.error('[log] channel is not text-based:', ch.id, ch.type);
       return;
     }
 
     await ch.send({ content });
-    console.log('[log] posted to', ch.id);
+    console.log('[log] posted to channel', ch.id);
   } catch (e) {
     console.error('[log] failed to post:', e);
   }
@@ -809,16 +804,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         events[interaction.guildId].push(ev);
         saveEvents(events);
 
-        // 🔔 ログチャンネルへ作成通知
-                await postToLogChannel(interaction.client, interaction.guildId, [
-                  '🗓️ **予定追加**',
-                  `【日付】${isoUTC ? DateTime.fromISO(isoUTC).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') + ' (JST)' : '未設定'}`,
-                  `【シナリオ名】${scenario}`,
-                  `【システム名】${system || '未設定'}`,
-                  `【GM名】<@${interaction.user.id}>`,
-                  `【部屋】<#${privateChannelId}>`,
-                  `ID:\`${ev.id}\``
-                ].join('\n'));
+
 
         // 掲示板を更新（最新版1件維持）
         await updateEventBoardMessage(interaction.client, interaction.guildId);
