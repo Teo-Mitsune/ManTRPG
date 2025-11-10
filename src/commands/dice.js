@@ -1,67 +1,53 @@
-// commands/dice.js
+// src/commands/dice.js
 import { SlashCommandBuilder } from 'discord.js';
-
-function parseDice(expr) {
-  // 例: 1d100, 3d6+2, 2d8-1
-  const m = expr.toLowerCase().replace(/\s+/g, '').match(/^(\d{1,3})d(\d{1,5})(?:([+-])(\d{1,6}))?$/);
-  if (!m) return null;
-  const n = parseInt(m[1], 10);
-  const sides = parseInt(m[2], 10);
-  const mod = m[3] ? (m[3] === '-' ? -parseInt(m[4], 10) : parseInt(m[4], 10)) : 0;
-  return { n, sides, mod };
-}
-
-function rollOnce(sides) {
-  // 1..sides の整数
-  return 1 + Math.floor(Math.random() * sides);
-}
 
 export const command = {
   data: new SlashCommandBuilder()
     .setName('dice')
-    .setDescription('ダイスを振ります（例: 1d100, 3d6+2）')
-    .addStringOption(opt =>
-      opt
-        .setName('expr')
-        .setDescription('式: NdM または NdM±K（例: 1d100, 3d6+2）')
+    .setDescription('ダイスを振ります（例: /dice 1d100）')
+    .addStringOption(option =>
+      option
+        .setName('roll')
+        .setDescription('XdY形式で指定 (例: 3d6, 1d100)')
         .setRequired(true)
     ),
 
   async execute(interaction) {
-    const exprRaw = interaction.options.getString('expr');
-    const parsed = parseDice(exprRaw);
+    const input = interaction.options.getString('roll')?.trim() ?? '';
 
-    if (!parsed) {
-      await interaction.reply({ content: '⛔ 式が不正です。例: `1d100`, `3d6+2`（NdM±K）', ephemeral: true });
-      return;
-    }
-
-    const { n, sides, mod } = parsed;
-
-    // 乱用防止のための上限
-    if (n < 1 || n > 100 || sides < 2 || sides > 100000) {
-      await interaction.reply({
-        content: '⛔ 範囲外です。ダイス個数は 1〜100、面数は 2〜100000 を指定してください。',
+    // パース
+    const match = input.match(/^(\d*)d(\d+)$/i);
+    if (!match) {
+      return interaction.reply({
+        content: '⚠️ 正しい形式で指定してください（例: `1d100`, `3d6`）',
         ephemeral: true
       });
-      return;
     }
 
-    // ロール
-    const rolls = Array.from({ length: n }, () => rollOnce(sides));
-    const sum = rolls.reduce((a, b) => a + b, 0);
-    const total = sum + mod;
+    const count = parseInt(match[1] || '1', 10);
+    const sides = parseInt(match[2], 10);
 
-    // 出力整形
-    let msg = `🎲 ${interaction.user} → \`${exprRaw}\`\n`;
-    if (n === 1 && mod === 0) {
-      msg += `結果: **${rolls[0]}**`;
-    } else {
-      msg += `出目: [${rolls.join(', ')}]`;
-      if (mod !== 0) msg += ` ${mod > 0 ? `+ ${mod}` : `- ${Math.abs(mod)}`}`;
-      msg += `\n合計: **${total}**`;
+    // 制限
+    if (count < 1 || sides < 1) {
+      return interaction.reply({ content: '⚠️ 数値は1以上を指定してください。', ephemeral: true });
+    }
+    if (count > 100) {
+      return interaction.reply({ content: '⚠️ ダイスの個数は最大100個までです。', ephemeral: true });
+    }
+    if (sides > 1000) {
+      return interaction.reply({ content: '⚠️ ダイスの面数は最大1000までです。', ephemeral: true });
     }
 
-    await interaction.reply({ content: msg });
-  },
+    // ダイスを振る
+    const rolls = Array.from({ length: count }, () => Math.floor(Math.random() * sides) + 1);
+    const total = rolls.reduce((a, b) => a + b, 0);
+
+    // 結果整形
+    const result =
+      count === 1
+        ? `🎲 **${rolls[0]}** (1d${sides})`
+        : `🎲 [${rolls.join(', ')}] → **合計: ${total}**`;
+
+    await interaction.reply({ content: result });
+  }
 };
