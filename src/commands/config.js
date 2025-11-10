@@ -5,7 +5,6 @@ import {
   PermissionFlagsBits
 } from 'discord.js';
 
-// storage は実行時にだけ import（デプロイ時にDB不要）
 export const command = {
   data: new SlashCommandBuilder()
     .setName('config')
@@ -40,7 +39,12 @@ export const command = {
         .addChannelOption(o =>
           o.setName('channel')
             .setDescription('掲示板チャンネル')
-            .addChannelTypes(ChannelType.GuildText, ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.GuildAnnouncement)
+            .addChannelTypes(
+              ChannelType.GuildText,
+              ChannelType.PublicThread,
+              ChannelType.PrivateThread,
+              ChannelType.GuildAnnouncement
+            )
             .setRequired(false)
         )
     )
@@ -51,38 +55,49 @@ export const command = {
     ),
 
   async execute(interaction) {
+    // 権限チェック（先に弾く）
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
       return interaction.reply({ content: '⛔ 管理者のみ使用できます。', ephemeral: true });
     }
 
+    // 3秒制限回避のため、まずデファー
+    await interaction.deferReply({ ephemeral: true });
+
     const sub = interaction.options.getSubcommand();
-    // ここでだけ storage を読み込む
-    const { getGuildConfig, setGuildConfig, loadConfig, saveConfig } = await import('../utils/storage.js');
+
+    // storage は「デファー後」に読み込み（遅延でも安全）
+    const { getGuildConfig, setGuildConfig, loadConfig, saveConfig } =
+      await import('../utils/storage.js');
 
     if (sub === 'setlogchannel') {
       const ch = interaction.options.getChannel('channel');
       if (!ch) {
         const cur = getGuildConfig(interaction.guildId);
-        return interaction.reply({ content: `現在のログチャンネル: ${cur?.logChannelId ? `<#${cur.logChannelId}>` : '未設定'}`, ephemeral: true });
+        return interaction.editReply(
+          `現在のログチャンネル: ${cur?.logChannelId ? `<#${cur.logChannelId}>` : '未設定'}`
+        );
       }
-      if (!ch.isTextBased?.() && ch.type !== ChannelType.GuildText) {
-        return interaction.reply({ content: '⛔ テキストチャンネルを指定してください。', ephemeral: true });
+      // テキスト投稿可であればOK（スレッド等も許容する場合は isTextBased を使う）
+      if (!(ch.isTextBased?.() || ch.type === ChannelType.GuildText)) {
+        return interaction.editReply('⛔ テキストチャンネルを指定してください。');
       }
       setGuildConfig(interaction.guildId, { logChannelId: ch.id });
-      return interaction.reply({ content: `✅ ログチャンネルを <#${ch.id}> に設定しました。`, ephemeral: true });
+      return interaction.editReply(`✅ ログチャンネルを <#${ch.id}> に設定しました。`);
     }
 
     if (sub === 'setcategory') {
       const cat = interaction.options.getChannel('category');
       if (!cat) {
         const cur = getGuildConfig(interaction.guildId);
-        return interaction.reply({ content: `現在のシナリオ用カテゴリ: ${cur?.eventCategoryId ? `<#${cur.eventCategoryId}>` : '未設定'}`, ephemeral: true });
+        return interaction.editReply(
+          `現在のシナリオ用カテゴリ: ${cur?.eventCategoryId ? `<#${cur.eventCategoryId}>` : '未設定'}`
+        );
       }
       if (cat.type !== ChannelType.GuildCategory) {
-        return interaction.reply({ content: '⛔ カテゴリチャンネルを指定してください。', ephemeral: true });
+        return interaction.editReply('⛔ カテゴリチャンネルを指定してください。');
       }
       setGuildConfig(interaction.guildId, { eventCategoryId: cat.id });
-      return interaction.reply({ content: `✅ シナリオ用カテゴリを **${cat.name}** に設定しました。`, ephemeral: true });
+      return interaction.editReply(`✅ シナリオ用カテゴリを **${cat.name}** に設定しました。`);
     }
 
     if (sub === 'setboardchannel') {
@@ -93,17 +108,20 @@ export const command = {
 
       if (!ch) {
         const cur = appCfg[interaction.guildId].eventBoard;
-        return interaction.reply({ content: `現在の掲示板チャンネル: ${cur?.channelId ? `<#${cur.channelId}>` : '未設定'}\n（最新版のみ1メッセージを自動維持）`, ephemeral: true });
+        return interaction.editReply(
+          `現在の掲示板チャンネル: ${cur?.channelId ? `<#${cur.channelId}>` : '未設定'}\n（最新版のみ1メッセージを自動維持）`
+        );
       }
       if (!ch.isTextBased?.()) {
-        return interaction.reply({ content: '⛔ テキスト投稿可能なチャンネルを指定してください。', ephemeral: true });
+        return interaction.editReply('⛔ テキスト投稿可能なチャンネルを指定してください。');
       }
 
-      // 切替時は旧掲示板メッセージを消す（あれば）
-      if (appCfg[interaction.guildId].eventBoard.messageId && appCfg[interaction.guildId].eventBoard.channelId) {
+      // 旧掲示板メッセージ掃除（存在すれば）
+      const prev = appCfg[interaction.guildId].eventBoard;
+      if (prev?.messageId && prev?.channelId) {
         try {
-          const oldCh = await interaction.client.channels.fetch(appCfg[interaction.guildId].eventBoard.channelId);
-          const oldMsg = await oldCh?.messages?.fetch(appCfg[interaction.guildId].eventBoard.messageId);
+          const oldCh = await interaction.client.channels.fetch(prev.channelId);
+          const oldMsg = await oldCh?.messages?.fetch(prev.messageId);
           await oldMsg?.delete().catch(() => {});
         } catch {}
       }
@@ -111,24 +129,27 @@ export const command = {
       appCfg[interaction.guildId].eventBoard = { channelId: ch.id, messageId: null };
       saveConfig(appCfg);
 
-      return interaction.reply({ content: `✅ 掲示板チャンネルを <#${ch.id}> に設定しました。`, ephemeral: true });
+      return interaction.editReply(`✅ 掲示板チャンネルを <#${ch.id}> に設定しました。`);
     }
 
     if (sub === 'reset') {
       setGuildConfig(interaction.guildId, { logChannelId: null, eventCategoryId: null });
+
       const appCfg = loadConfig();
-      if (appCfg[interaction.guildId]?.eventBoard?.messageId && appCfg[interaction.guildId]?.eventBoard?.channelId) {
+      const prev = appCfg[interaction.guildId]?.eventBoard;
+      if (prev?.messageId && prev?.channelId) {
         try {
-          const oldCh = await interaction.client.channels.fetch(appCfg[interaction.guildId].eventBoard.channelId);
-          const oldMsg = await oldCh?.messages?.fetch(appCfg[interaction.guildId].eventBoard.messageId);
+          const oldCh = await interaction.client.channels.fetch(prev.channelId);
+          const oldMsg = await oldCh?.messages?.fetch(prev.messageId);
           await oldMsg?.delete().catch(() => {});
         } catch {}
       }
       appCfg[interaction.guildId] = {};
       saveConfig(appCfg);
-      return interaction.reply({ content: '♻️ 設定を初期化しました。', ephemeral: true });
+
+      return interaction.editReply('♻️ 設定を初期化しました。');
     }
 
-    return interaction.reply({ content: '⛔ 未対応のサブコマンドです。', ephemeral: true });
+    return interaction.editReply('⛔ 未対応のサブコマンドです。');
   }
 };
