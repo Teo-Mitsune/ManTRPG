@@ -75,6 +75,78 @@ async function safeEdit(interaction, payload) {
   }
 }
 
+// ---- 掲示板（最新版1件のみ維持） ----
+async function composeBoardContent(guildId) {
+  const eventsAll = loadEvents();
+  const list = (eventsAll[guildId] ?? []).slice().sort((a, b) => {
+    const ka = formatJST(a.datetimeUTC) ?? '9999-12-31 23:59';
+    const kb = formatJST(b.datetimeUTC) ?? '9999-12-31 23:59';
+    return ka < kb ? -1 : 1;
+  });
+
+  if (list.length === 0) {
+    return [
+      '🗓️ **現在、予定はありません**',
+      '新規作成は `/ui` → 「予定を追加」からどうぞ。'
+    ].join('\n');
+  }
+
+  const lines = list.map(e => {
+    const when = formatJST(e.datetimeUTC) ?? '未設定';
+    const sys = safe(e.systemName);
+    const scen = safe(e.scenarioName);
+    const n = Array.isArray(e.participants) ? e.participants.length : 0;
+    return `• ${when} / ${scen} / ${sys} — 参加者: ${n}人`;
+  });
+
+  return `🗓️ **セッション募集一覧（最新版）**\n` + lines.join('\n') + `\n\n※このメッセージは最新状態を反映します。`;
+}
+
+async function updateEventBoardMessage(client, guildId) {
+  // app config から掲示板設定を取得
+  const { loadConfig, saveConfig } = await import('./utils/storage.js');
+  const appCfg = loadConfig();
+  const board = appCfg[guildId]?.eventBoard ?? { channelId: null, messageId: null };
+  if (!board.channelId) return; // 未設定なら何もしない
+
+  const content = await composeBoardContent(guildId);
+
+  try {
+    const ch = await client.channels.fetch(board.channelId);
+    if (!ch?.isTextBased()) return;
+
+    if (board.messageId) {
+      // 既存を編集（なければ新規投稿）
+      try {
+        const msg = await ch.messages.fetch(board.messageId);
+        await msg.edit({ content });
+        return; // 編集できたら終了（常に1件を維持）
+      } catch {
+        // 既存メッセージが無い/削除済み → 新規投稿へ
+      }
+    }
+
+    // 新規投稿
+    const newMsg = await ch.send({ content });
+
+    // 直前のメッセージが別にあれば掃除（保険）
+    if (board.messageId && board.messageId !== newMsg.id) {
+      try {
+        const oldMsg = await ch.messages.fetch(board.messageId);
+        await oldMsg.delete().catch(() => {});
+      } catch {}
+    }
+
+    // ID を保存
+    appCfg[guildId] ??= {};
+    appCfg[guildId].eventBoard = { channelId: board.channelId, messageId: newMsg.id };
+    saveConfig(appCfg);
+  } catch (e) {
+    console.error('[board] update failed:', e);
+  }
+}
+
+
 function formatJST(isoUtc) {
   return isoUtc ? DateTime.fromISO(isoUtc).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') : null;
 }
@@ -205,7 +277,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.commandName === 'ui') {
       const row1 = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('ui_add').setLabel('予定を追加').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('ui_list').setLabel('予定一覧').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('ui_edit').setLabel('予定を編集').setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId('ui_remove').setLabel('予定を削除').setStyle(ButtonStyle.Danger),
       );
@@ -304,38 +375,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // 一覧
-    if (id === 'ui_list') {
-      const events = loadEvents();
-      const list = sortEventsForUI(events[interaction.guildId] ?? []);
-      const me = interaction.user.id;
-
-      if (list.length === 0) {
-        await interaction.reply({ content: '（予定はありません）', ephemeral: true });
-        return;
-      }
-
-      const lines = list.slice(0, 20).map(e => {
-        ensureParticipants(e);
-        const whenTxt = formatJST(e.datetimeUTC) ?? '未設定';
-        const joined = e.participants.includes(me);
-        const isCreator = e.createdBy === me;
-
-        let info = '';
-        if (joined) {
-          info = ` / 参加者:${e.participants.length}人 / 参加済`;
-        } else if (isCreator) {
-          info = ` / 参加者:${e.participants.length}人 / （作成者）`;
-        } else {
-          info = ' / 参加者:非公開';
-        }
-
-        return `• ${whenTxt} / ${safe(e.scenarioName)} / ${safe(e.systemName)}${info} | id:\`${e.id}\`${e.notified ? ' (通知済)' : ''}`;
-      });
-
-      await interaction.reply({ content: lines.join('\n'), ephemeral: true });
-      return;
-    }
 
     // 編集対象選択
     if (id === 'ui_edit') {
@@ -549,6 +588,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const [removed] = arr.splice(idx, 1);
       events[interaction.guildId] = arr;
       saveEvents(events);
+      await updateEventBoardMessage(interaction.client, interaction.guildId);
+
 
       await interaction.editReply({
         content: `🗑️ 削除しました：\n${linesForEvent(removed).join('\n')}\nID:\`${removed.id}\``
@@ -571,6 +612,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       ensureParticipants(ev);
       if (!ev.participants.includes(me)) ev.participants.push(me);
       saveEvents(events);
+      await updateEventBoardMessage(interaction.client, interaction.guildId);
+
 
       if (ev.privateChannelId) {
         await grantAccessToPrivateChannel(interaction.guild, ev.privateChannelId, me);
@@ -601,6 +644,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       ensureParticipants(ev);
       ev.participants = ev.participants.filter(u => u !== me);
       saveEvents(events);
+      await updateEventBoardMessage(interaction.client, interaction.guildId);
+
 
       if (ev.privateChannelId && ev.createdBy !== me) {
         await revokeAccessFromPrivateChannel(interaction.guild, ev.privateChannelId, me);
@@ -724,6 +769,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         };
         events[interaction.guildId].push(ev);
         saveEvents(events);
+        await updateEventBoardMessage(interaction.client, interaction.guildId);
+
 
         await interaction.reply({
           content: [
@@ -783,6 +830,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         ev.scenarioName = scenario;                // 必須
         ev.systemName = system ? system : null;    // 空ならクリア
         saveEvents(events);
+        await updateEventBoardMessage(interaction.client, interaction.guildId);
+
 
         await interaction.reply({
           content: [
