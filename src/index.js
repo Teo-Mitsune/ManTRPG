@@ -74,6 +74,18 @@ async function safeEdit(interaction, payload) {
     console.error('[safeEdit]', e);
   }
 }
+async function postToLogChannel(client, guildId, content) {
+  try {
+    const { getGuildConfig } = await import('./utils/storage.js');
+    const cfg = getGuildConfig(guildId);
+    if (!cfg?.logChannelId) return;
+    const ch = await client.channels.fetch(cfg.logChannelId).catch(() => null);
+    if (!ch?.isTextBased()) return;
+    await ch.send({ content });
+  } catch (e) {
+    console.error('[log] failed to post:', e);
+  }
+}
 
 // ---- 掲示板（最新版1件のみ維持） ----
 async function composeBoardContent(guildId) {
@@ -370,6 +382,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ActionRowBuilder().addComponents(scenario),
         new ActionRowBuilder().addComponents(system),
       );
+
 
       await interaction.showModal(modal);
       return;
@@ -749,7 +762,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           isoUTC = parsed.toUTC().toISO();
         }
 
-        // 個室チャンネル作成（作成者に権限付与）
+        // 個室チャンネル作成
         const privateChannelId = await createPrivateChannelForScenario(
           interaction, scenario, interaction.user.id, cfg.eventCategoryId
         );
@@ -769,9 +782,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
         };
         events[interaction.guildId].push(ev);
         saveEvents(events);
+
+        // 掲示板を更新（最新版1件維持）
         await updateEventBoardMessage(interaction.client, interaction.guildId);
 
+        // 🔔 ログチャンネルへ作成通知
+        await postToLogChannel(interaction.client, interaction.guildId, [
+          '🗓️ **予定追加**',
+          `【日付】${isoUTC ? DateTime.fromISO(isoUTC).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') + ' (JST)' : '未設定'}`,
+          `【シナリオ名】${scenario}`,
+          `【システム名】${system || '未設定'}`,
+          `【GM名】<@${interaction.user.id}>`,
+          `【部屋】<#${privateChannelId}>`,
+          `ID:\`${ev.id}\``
+        ].join('\n'));
 
+        // 作成者へエフェメラル返信
         await interaction.reply({
           content: [
             '✅ **予定を作成しました**',
@@ -794,6 +820,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       return;
     }
+  }
+
 
     // 予定 編集（customId: ui_edit_modal:<eventId>）
     if (id.startsWith('ui_edit_modal:')) {
