@@ -108,6 +108,7 @@ async function postToLogChannel(client, guildId, content) {
   }
 }
 
+
 // ---- 掲示板（最新版1件のみ維持） ----
 async function composeBoardContent(guildId) {
   const eventsAll = loadEvents();
