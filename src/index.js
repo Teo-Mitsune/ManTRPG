@@ -51,8 +51,17 @@ client.commands = new Collection();
   console.log('[loaded commands]', [...client.commands.keys()]);
 }
 
-client.once(Events.ClientReady, (c) => {
+client.once(Events.ClientReady, async (c) => {
   console.log(`✅ Logged in as ${c.user.tag}`);
+
+  // --- 起動時に Neon(DB) → メモリへ復元 ---
+  try {
+    const restored = await restoreFromDB();
+    console.log(`[restoreFromDB] events restored: ${restored.eventCount}, guilds: ${restored.guildCount}`);
+  } catch (e) {
+    console.error('[restoreFromDB] failed:', e);
+  }
+
   startScheduler(client);
 });
 
