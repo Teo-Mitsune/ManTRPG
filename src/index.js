@@ -13,8 +13,7 @@ import { DateTime } from 'luxon';
 import { startScheduler } from './scheduler.js';
 import {
   loadEvents, saveEvents, ensureGuildBucket, makeId,
-  getGuildConfig,
-  restoreFromDB
+  getGuildConfig
 } from './utils/storage.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -52,27 +51,8 @@ client.commands = new Collection();
   console.log('[loaded commands]', [...client.commands.keys()]);
 }
 
-client.once(Events.ClientReady, async (c) => {
+client.once(Events.ClientReady, (c) => {
   console.log(`✅ Logged in as ${c.user.tag}`);
-
-  // ★ ここから：Neonから復元 → ギルドごとに掲示板メッセージを再構成
-  try {
-    await restoreFromDB(); // Neon -> メモリへ（events/config など）
-    console.log('[boot] restored state from Neon');
-
-    // 参加している全ギルドの掲示板（eventBoard）を最新化
-    for (const [guildId] of client.guilds.cache) {
-      try {
-        await updateEventBoardMessage(client, guildId);
-      } catch (e) {
-        console.error('[boot] board update failed for guild', guildId, e);
-      }
-    }
-  } catch (e) {
-    console.error('[boot] restoreFromDB failed:', e);
-  }
-  // ★ ここまで
-
   startScheduler(client);
 });
 
@@ -230,8 +210,91 @@ function slugifyName(name) {
     .replace(/^-|-$/g, '')
     .slice(0, 90);
 }
-async function createPrivateChannelForScenario(interaction, scenarioName, createdByUserId, categoryId) {
+
+/**
+ * シナリオ用の個室を作成する。
+ * roomMode によって挙動を切り替え：
+ *  - 'channel'  : 指定カテゴリ配下にテキストチャンネルを1つ作成（従来仕様）
+ *  - 'category' : シナリオ名でカテゴリを作成し、その中にテキストチャンネルを1つ作成
+ *
+ * 戻り値は「メインで使うテキストチャンネルの ID」
+ */
+async function createPrivateChannelForScenario(interaction, scenarioName, createdByUserId, categoryId, roomMode = 'channel') {
   const base = slugifyName(scenarioName);
+  const everyone = interaction.guild.roles.everyone.id;
+  const botId = interaction.client.user.id;
+
+  // ---- カテゴリモード：カテゴリ + 中のテキストチャンネルを作成 ----
+  if (roomMode === 'category') {
+    const allChannels = await interaction.guild.channels.fetch();
+    const existingCategories = allChannels.filter(ch => ch.type === ChannelType.GuildCategory);
+
+    let catName = base;
+    let i = 2;
+    while (existingCategories.find(ch => ch.name === catName)) {
+      catName = `${base}-${i++}`;
+    }
+
+    const parentCategory = await interaction.guild.channels.create({
+      name: catName,
+      type: ChannelType.GuildCategory,
+      permissionOverwrites: [
+        { id: everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
+        {
+          id: botId,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ReadMessageHistory,
+            PermissionsBitField.Flags.ManageChannels
+          ]
+        },
+        {
+          id: createdByUserId,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ReadMessageHistory,
+          ]
+        }
+      ]
+    });
+
+    // カテゴリの中に実際のテキストチャンネル（個室）を作る
+    const textChannel = await interaction.guild.channels.create({
+      name: 'テキスト',
+      type: ChannelType.GuildText,
+      parent: parentCategory.id,
+      permissionOverwrites: [
+        { id: everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
+        {
+          id: botId,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ReadMessageHistory,
+            PermissionsBitField.Flags.ManageChannels
+          ]
+        },
+        {
+          id: createdByUserId,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ReadMessageHistory,
+          ]
+        }
+      ]
+    });
+
+    await textChannel.send({
+      content: `🗓️ **シナリオ部屋**\nこのチャンネルは予定作成により自動生成されました。\n作成者: <@${createdByUserId}>\nシナリオ名: **${scenarioName}**`
+    });
+
+    return textChannel.id;
+  }
+
+  // ---- チャンネルモード（従来通り）：指定カテゴリ配下にテキストチャンネルを作成 ----
   const parent = await interaction.guild.channels.fetch(categoryId).catch(() => null);
   if (!parent || parent.type !== ChannelType.GuildCategory) {
     throw new Error('カテゴリが無効です。/config setcategory で正しいカテゴリを設定してください。');
@@ -244,9 +307,6 @@ async function createPrivateChannelForScenario(interaction, scenarioName, create
   while (siblings.find(ch => ch.name === name)) {
     name = `${base}-${i++}`;
   }
-
-  const everyone = interaction.guild.roles.everyone.id;
-  const botId = interaction.client.user.id;
 
   const ch = await interaction.guild.channels.create({
     name,
@@ -280,6 +340,7 @@ async function createPrivateChannelForScenario(interaction, scenarioName, create
 
   return ch.id;
 }
+
 async function grantAccessToPrivateChannel(guild, channelId, userId) {
   try {
     const ch = await guild.channels.fetch(channelId);
@@ -417,10 +478,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setStyle(TextInputStyle.Short)
         .setRequired(false);
 
+      // ★ 部屋タイプ選択欄（ch / cat）
+      const roommode = new TextInputBuilder()
+        .setCustomId('ui_roommode')
+        .setLabel('【部屋タイプ】ch=チャンネル / cat=カテゴリ（空でもOK）')
+        .setPlaceholder('例: ch / cat （未入力なら ch）')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false);
+
       modal.addComponents(
         new ActionRowBuilder().addComponents(dateTime),
         new ActionRowBuilder().addComponents(scenario),
         new ActionRowBuilder().addComponents(system),
+        new ActionRowBuilder().addComponents(roommode),
       );
 
       await interaction.showModal(modal);
@@ -559,7 +629,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .addOptions(options);
 
       const row = new ActionRowBuilder().addComponents(select);
-      await interaction.reply({ content: '👀 参加者を確認する予定を選んでください（未参加者は人数・名前ともに非公開／作成者は人数のみ常時閲覧可）', components: [row], ephemeral: true });
+      await interaction.reply({
+        content: '👀 参加者を確認する予定を選んでください（未参加者は人数・名前ともに非公開／作成者は人数のみ常時閲覧可）',
+        components: [row],
+        ephemeral: true
+      });
       return;
     }
 
@@ -767,9 +841,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // 予定 追加（customId: ui_add）
     if (id === 'ui_add') {
       try {
-        const dtText   = interaction.fields.getTextInputValue('ui_dt')?.trim() ?? '';
-        const scenario = interaction.fields.getTextInputValue('ui_scenario')?.trim() ?? '';
-        const system   = interaction.fields.getTextInputValue('ui_system')?.trim() ?? '';
+        const dtText      = interaction.fields.getTextInputValue('ui_dt')?.trim() ?? '';
+        const scenario    = interaction.fields.getTextInputValue('ui_scenario')?.trim() ?? '';
+        const system      = interaction.fields.getTextInputValue('ui_system')?.trim() ?? '';
+        const roomModeRaw = interaction.fields.getTextInputValue('ui_roommode')?.trim().toLowerCase() ?? '';
 
         if (!scenario) {
           await interaction.reply({ content: '⛔ シナリオ名は必須です。', ephemeral: true });
@@ -786,6 +861,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
+        // 部屋モード判定（未入力なら channel）
+        let roomMode = 'channel';
+        if (roomModeRaw) {
+          if (['cat', 'category', 'c'].includes(roomModeRaw)) {
+            roomMode = 'category';
+          } else if (['ch', 'channel'].includes(roomModeRaw)) {
+            roomMode = 'channel';
+          } else {
+            await interaction.reply({
+              content: '⛔ 部屋タイプは `ch` または `cat` で指定してください（空欄でもOK）。',
+              ephemeral: true
+            });
+            return;
+          }
+        }
+
         // JST → UTC（空なら未設定扱い）
         let isoUTC = null;
         if (dtText) {
@@ -797,9 +888,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
           isoUTC = parsed.toUTC().toISO();
         }
 
-        // 個室チャンネル作成
+        // 個室チャンネル作成（roomMode により挙動切替）
         const privateChannelId = await createPrivateChannelForScenario(
-          interaction, scenario, interaction.user.id, cfg.eventCategoryId
+          interaction, scenario, interaction.user.id, cfg.eventCategoryId, roomMode
         );
 
         // 保存
@@ -822,13 +913,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await updateEventBoardMessage(interaction.client, interaction.guildId);
 
         // ログチャンネル通知
+        const modeLabel = roomMode === 'category'
+          ? 'カテゴリ+個室チャンネル'
+          : 'カテゴリ内の個室チャンネル';
+
         await postToLogChannel(interaction.client, interaction.guildId, [
           '🗓️ **予定追加**',
           `【日付】${isoUTC ? DateTime.fromISO(isoUTC).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') + ' (JST)' : '未設定'}`,
           `【シナリオ名】${scenario}`,
           `【システム名】${system || '未設定'}`,
           `【GM名】<@${interaction.user.id}>`,
-          `【部屋】<#${privateChannelId}>`,
+          `【部屋】<#${privateChannelId}> （${modeLabel}）`,
           `ID:\`${ev.id}\``
         ].join('\n'));
 
@@ -841,6 +936,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             `【システム名】${system || '未設定'}`,
             `【GM名】<@${interaction.user.id}>`,
             `【部屋】<#${privateChannelId}>`,
+            `【部屋タイプ】${modeLabel}`,
             `ID:\`${ev.id}\``
           ].join('\n'),
           ephemeral: true
