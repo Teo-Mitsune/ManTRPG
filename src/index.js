@@ -13,7 +13,7 @@ import { DateTime } from 'luxon';
 import { startScheduler } from './scheduler.js';
 import {
   loadEvents, saveEvents, ensureGuildBucket, makeId,
-  getGuildConfig
+  getGuildConfig, restoreFromDB
 } from './utils/storage.js';
 
 const __filename = fileURLToPath(import.meta.url);
