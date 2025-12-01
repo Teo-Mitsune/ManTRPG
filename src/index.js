@@ -698,6 +698,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setRequired(false)
         .setValue(currentSystem);
 
+      const gamemaster = new TextInputBuilder()
+        .setCustomId('ui_gamemaster')
+        .setLabel('【GM名】（空でクリア）')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setValue(currentGamemaster)
+
       modal.addComponents(
         new ActionRowBuilder().addComponents(dateTime),
         new ActionRowBuilder().addComponents(scenario),
@@ -910,7 +917,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           datetimeUTC: isoUTC,
           scenarioName: scenario,
           systemName: system || null,
-          createdBy: interaction.user.id,
+          gamemasterName: gamemaster,
           participants: [interaction.user.id],
           notified: false,
           privateChannelId
@@ -932,7 +939,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           `【日付】${isoUTC ? DateTime.fromISO(isoUTC).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') + ' (JST)' : '未設定'}`,
           `【シナリオ名】${scenario}`,
           `【システム名】${system || '未設定'}`,
-          `【GM名】<@${interaction.user.id}>`,
+          `【GM名】${gamemaster}`,
           `【部屋】<#${privateChannelId}> （${modeLabel}）`,
           `ID:\`${ev.id}\``
         ].join('\n'));
@@ -944,7 +951,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             `【日付】${isoUTC ? DateTime.fromISO(isoUTC).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') + ' (JST)' : '未設定'}`,
             `【シナリオ名】${scenario}`,
             `【システム名】${system || '未設定'}`,
-            `【GM名】<@${interaction.user.id}>`,
+            `【GM名】${gamemaster}`,
             `【部屋】<#${privateChannelId}>`,
             `【部屋タイプ】${modeLabel}`,
             `ID:\`${ev.id}\``
