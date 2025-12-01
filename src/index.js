@@ -728,6 +728,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.reply({
           content: [
             '✅ **予定を作成しました**',
+            `<@everyone>`,
             `【日付】${isoUTC ? DateTime.fromISO(isoUTC).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') + ' (JST)' : '未設定'}`,
             `【シナリオ名】${scenario}`,
             `【システム名】${system || '未設定'}`,
