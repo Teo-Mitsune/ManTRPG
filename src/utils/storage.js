@@ -1,23 +1,19 @@
 // src/utils/storage.js
-// 既存の同期APIを保ったまま、裏側をPostgreSQLに永続化。
-// - events系: loadEvents/saveEvents/ensureGuildBucket（同期: メモリキャッシュ、裏で非同期保存）
-// - ギルド設定: getGuildConfig/setGuildConfig
-// - 追加: ロール配布用設定（旧roles.js互換）loadConfig/saveConfig/ensureRolesPanelConfig
-//   → app_configs テーブル(JSONB)に { [guildId]: { rolesPanel: {...} } } を保存
+// PostgreSQL 永続化対応 + メモリキャッシュ
+// （events, guild_configs, app_configs を永続化）
 
 import crypto from 'crypto';
 import pg from 'pg';
-
 const { Pool } = pg;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) {
-  throw new Error('DATABASE_URL is not set. Please define it in environment variables.');
+  throw new Error('DATABASE_URL is not set. Please define it in .env');
 }
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false } // Neon/Supabase等で必要
+  ssl: { rejectUnauthorized: false }
 });
 
 // ---------- スキーマ ----------
@@ -48,7 +44,6 @@ CREATE TABLE IF NOT EXISTS participants (
 CREATE INDEX IF NOT EXISTS idx_events_guild ON events(guild_id);
 CREATE INDEX IF NOT EXISTS idx_participants_event ON participants(event_id);
 
-/* 追加: 任意のアプリ設定(JSONB)。roles.js の設定をここに入れる */
 CREATE TABLE IF NOT EXISTS app_configs (
   guild_id TEXT PRIMARY KEY,
   data JSONB NOT NULL DEFAULT '{}'::jsonb
@@ -56,20 +51,18 @@ CREATE TABLE IF NOT EXISTS app_configs (
 `;
 
 // ---------- メモリキャッシュ ----------
-let cacheEvents = {};   // { [guildId]: Event[] }
-let cacheGConfigs = {}; // { [guildId]: { logChannelId, eventCategoryId } }
-let cacheAppCfg = {};   // { [guildId]: { rolesPanel?: {...} } }
+let cacheEvents = {};
+let cacheGConfigs = {};
+let cacheAppCfg = {};
 let inited = false;
-
 const clone = (o) => JSON.parse(JSON.stringify(o ?? {}));
 
 // ---------- 初期ロード ----------
-async function loadAllFromDB() {
+export async function restoreFromDB() {
   const client = await pool.connect();
   try {
     await client.query(initSQL);
 
-    // guild_configs
     const cfg = await client.query('SELECT * FROM guild_configs');
     cacheGConfigs = {};
     for (const r of cfg.rows) {
@@ -79,10 +72,9 @@ async function loadAllFromDB() {
       };
     }
 
-    // events / participants
     const evRes = await client.query('SELECT * FROM events');
     const paRes = await client.query('SELECT * FROM participants');
-    const pmap = new Map(); // event_id -> [user_id]
+    const pmap = new Map();
     for (const p of paRes.rows) {
       if (!pmap.has(p.event_id)) pmap.set(p.event_id, []);
       pmap.get(p.event_id).push(p.user_id);
@@ -103,7 +95,6 @@ async function loadAllFromDB() {
       cacheEvents[e.guild_id].push(ev);
     }
 
-    // app_configs（roles.js互換）
     const app = await client.query('SELECT guild_id, data FROM app_configs');
     cacheAppCfg = {};
     for (const r of app.rows) {
@@ -111,65 +102,51 @@ async function loadAllFromDB() {
     }
 
     inited = true;
-    console.log('[storage] DB loaded: configs=%d, guilds=%d',
-      Object.keys(cacheGConfigs).length, Object.keys(cacheEvents).length);
+    console.log('[storage] DB restored: guilds=%d', Object.keys(cacheEvents).length);
   } finally {
     client.release();
   }
 }
 
-// ★ モジュール読込時にDBへ即アクセスしないようにする
-export async function initStorage() {
-  if (!inited) {
-    await loadAllFromDB();
-  }
-}
-
-// ---------- 公開API（既存互換） ----------
+// ---------- 公開API ----------
 export function makeId(bytes = 6) {
   return crypto.randomBytes(bytes).toString('hex');
 }
 
-// --- events（同期キャッシュ + 非同期保存） ---
 export function loadEvents() {
   return clone(cacheEvents);
 }
+
 export function saveEvents(obj) {
   cacheEvents = clone(obj ?? {});
   void persistEventsToDB(cacheEvents).catch(e =>
     console.error('[storage] persist events failed:', e)
   );
 }
+
 export function ensureGuildBucket(eventsObj, guildId) {
   if (!eventsObj[guildId]) eventsObj[guildId] = [];
   return eventsObj;
 }
 
-// --- guild_configs（同期キャッシュ + 非同期UPSERT） ---
 export function getGuildConfig(guildId) {
   return clone(cacheGConfigs[guildId] ?? { logChannelId: null, eventCategoryId: null });
 }
-export function setGuildConfig(guildId, patch) {
+
+export function setGuildConfig(guildId, partial) {
   const cur = cacheGConfigs[guildId] ?? { logChannelId: null, eventCategoryId: null };
   const next = {
-    logChannelId: (Object.prototype.hasOwnProperty.call(patch, 'logChannelId') ? patch.logChannelId : cur.logChannelId) ?? null,
-    eventCategoryId: (Object.prototype.hasOwnProperty.call(patch, 'eventCategoryId') ? patch.eventCategoryId : cur.eventCategoryId) ?? null
+    logChannelId: partial.logChannelId ?? cur.logChannelId ?? null,
+    eventCategoryId: partial.eventCategoryId ?? cur.eventCategoryId ?? null
   };
   cacheGConfigs[guildId] = next;
-
-  // reset 的な利用時の安全性を高める
-  if (next.logChannelId === null && next.eventCategoryId === null) {
-    // 完全初期化に近い意図 → キャッシュも空にしておく
-    delete cacheGConfigs[guildId];
-  }
-
   void persistGuildConfigToDB(guildId, next).catch(e =>
     console.error('[storage] persist guild_config failed:', e)
   );
   return clone(next);
 }
 
-// --- app_configs（roles.js互換API） ---
+// app_configs (roles.js互換)
 export function loadConfig() {
   return clone(cacheAppCfg);
 }
@@ -179,19 +156,19 @@ export function saveConfig(obj) {
     console.error('[storage] persist app_config failed:', e)
   );
 }
-export function ensureRolesPanelConfig(cfgObj, guildId) {
-  if (!cfgObj[guildId]) cfgObj[guildId] = {};
-  if (!cfgObj[guildId].rolesPanel) {
-    cfgObj[guildId].rolesPanel = { channelId: null, messageId: null, roles: {} };
-  } else {
-    cfgObj[guildId].rolesPanel.channelId ??= null;
-    cfgObj[guildId].rolesPanel.messageId ??= null;
-    cfgObj[guildId].rolesPanel.roles ??= {};
-  }
-  return cfgObj;
+export function ensureRolesPanelConfig(appCfg, guildId) {
+  appCfg[guildId] ??= {};
+  const panel = appCfg[guildId].rolesPanel ?? {
+    channelId: null,
+    messageId: null,
+    buttons: []
+  };
+  if (!Array.isArray(panel.buttons)) panel.buttons = [];
+  appCfg[guildId].rolesPanel = panel;
+  return panel;
 }
 
-// ---------- 内部: DB永続化 ----------
+// ---------- 内部永続化 ----------
 async function persistEventsToDB(all) {
   const client = await pool.connect();
   try {
