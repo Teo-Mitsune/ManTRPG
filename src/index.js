@@ -709,6 +709,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ActionRowBuilder().addComponents(dateTime),
         new ActionRowBuilder().addComponents(scenario),
         new ActionRowBuilder().addComponents(system),
+        new ActionRowBuilder().addComponents(gamemaster)
       );
 
       await interaction.showModal(modal);
