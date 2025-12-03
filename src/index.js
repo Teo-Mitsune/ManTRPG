@@ -203,7 +203,7 @@ function linesForEvent(ev) {
     `【日付】${formatJST(ev.datetimeUTC) ?? '未設定'}`,
     `【シナリオ名】${safe(ev.scenarioName)}`,
     `【システム名】${safe(ev.systemName)}`,
-    `【GM名】<@${ev.createdBy}>`
+    `【GM名】${ev.gamemasterName}`
   ];
 }
 function ensureParticipants(ev) {
@@ -672,6 +672,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const currentDt = formatJST(ev.datetimeUTC) ?? '';
       const currentScenario = ev.scenarioName ?? '';
       const currentSystem = ev.systemName ?? '';
+      const currentGamemaster = ev.gamemasterName ?? '';
 
       const modal = new ModalBuilder()
         .setCustomId(`ui_edit_modal:${id}`)
@@ -918,7 +919,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           datetimeUTC: isoUTC,
           scenarioName: scenario,
           systemName: system || null,
-          gamemasterName: gamemaster,
+          gamemasterName: gamemaster || null,
           participants: [interaction.user.id],
           notified: false,
           privateChannelId
@@ -1004,6 +1005,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         ev.datetimeUTC = dtText ? isoUTC : null;   // 空なら日付クリア
         ev.scenarioName = scenario;                // 必須
         ev.systemName = system ? system : null;    // 空ならクリア
+        ev.gamemasterName = gamemaster ? gamemaster : null;
         saveEvents(events);
 
         // 掲示板更新
@@ -1015,7 +1017,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             `【日付】${ev.datetimeUTC ? DateTime.fromISO(ev.datetimeUTC).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') + ' (JST)' : '未設定'}`,
             `【シナリオ名】${ev.scenarioName}`,
             `【システム名】${ev.systemName ?? '未設定'}`,
-            `【GM名】<@${ev.createdBy}>`,
+            `【GM名】${ev.gamemasterName}`,
             `ID:\`${ev.id}\``
           ].join('\n'),
           ephemeral: true

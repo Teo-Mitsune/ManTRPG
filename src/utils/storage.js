@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS events (
   datetime_utc TIMESTAMPTZ NULL,
   scenario_name TEXT NOT NULL,
   system_name TEXT NULL,
-  created_by TEXT NOT NULL,
+  gamemaster TEXT NULL,
   notified BOOLEAN NOT NULL DEFAULT FALSE,
   private_channel_id TEXT NULL
 );
@@ -86,7 +86,7 @@ export async function restoreFromDB() {
         datetimeUTC: e.datetime_utc ? e.datetime_utc.toISOString() : null,
         scenarioName: e.scenario_name,
         systemName: e.system_name,
-        createdBy: e.created_by,
+        gamemaster: e.gamemaster,
         participants: pmap.get(e.id) ?? [],
         notified: !!e.notified,
         privateChannelId: e.private_channel_id
@@ -178,7 +178,7 @@ async function persistEventsToDB(all) {
 
     const evInsert = `
       INSERT INTO events
-        (id, guild_id, datetime_utc, scenario_name, system_name, created_by, notified, private_channel_id)
+        (id, guild_id, datetime_utc, scenario_name, system_name, gamemaster, notified, private_channel_id)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
     `;
     const paInsert = `INSERT INTO participants (event_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`;
@@ -192,7 +192,7 @@ async function persistEventsToDB(all) {
           ev.datetimeUTC ? new Date(ev.datetimeUTC) : null,
           ev.scenarioName ?? '',
           ev.systemName ?? null,
-          ev.createdBy ?? 'unknown',
+          ev.gamemaster ?? null,
           !!ev.notified,
           ev.privateChannelId ?? null
         ]);
