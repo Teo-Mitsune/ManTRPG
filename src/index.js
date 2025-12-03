@@ -203,7 +203,7 @@ function linesForEvent(ev) {
     `【日付】${formatJST(ev.datetimeUTC) ?? '未設定'}`,
     `【シナリオ名】${safe(ev.scenarioName)}`,
     `【システム名】${safe(ev.systemName)}`,
-    `【GM名】${ev.gamemasterName}`
+    `【GM名】${ev.gamemasterName ?? '未設定'}`
   ];
 }
 function ensureParticipants(ev) {
@@ -487,7 +487,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setStyle(TextInputStyle.Short)
         .setRequired(false);
 
-      // ★ 部屋タイプ選択欄（ch / cat）
+      const gm = new TextInputBuilder()
+        .setCustomId('ui_gamemaster')
+        .setLabel('【GM名】（空でもOK）')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false);
+
+      // 部屋タイプ選択欄（ch / cat）
       const roommode = new TextInputBuilder()
         .setCustomId('ui_roommode')
         .setLabel('【部屋タイプ】ch=チャンネル / cat=カテゴリ（空でもOK）')
@@ -499,6 +505,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ActionRowBuilder().addComponents(dateTime),
         new ActionRowBuilder().addComponents(scenario),
         new ActionRowBuilder().addComponents(system),
+        new ActionRowBuilder().addComponents(gm),
         new ActionRowBuilder().addComponents(roommode),
       );
 
@@ -704,7 +711,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setLabel('【GM名】（空でクリア）')
         .setStyle(TextInputStyle.Short)
         .setRequired(false)
-        .setValue(currentGamemaster)
+        .setValue(currentGamemaster);
 
       modal.addComponents(
         new ActionRowBuilder().addComponents(dateTime),
@@ -862,6 +869,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const dtText      = interaction.fields.getTextInputValue('ui_dt')?.trim() ?? '';
         const scenario    = interaction.fields.getTextInputValue('ui_scenario')?.trim() ?? '';
         const system      = interaction.fields.getTextInputValue('ui_system')?.trim() ?? '';
+        const gamemaster  = interaction.fields.getTextInputValue('ui_gamemaster')?.trim() ?? '';
         const roomModeRaw = interaction.fields.getTextInputValue('ui_roommode')?.trim().toLowerCase() ?? '';
 
         if (!scenario) {
@@ -920,6 +928,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           scenarioName: scenario,
           systemName: system || null,
           gamemasterName: gamemaster || null,
+          createdBy: interaction.user.id,        // ★★ ここ重要：createdBy を必ず入れる ★★
           participants: [interaction.user.id],
           notified: false,
           privateChannelId
@@ -941,7 +950,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           `【日付】${isoUTC ? DateTime.fromISO(isoUTC).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') + ' (JST)' : '未設定'}`,
           `【シナリオ名】${scenario}`,
           `【システム名】${system || '未設定'}`,
-          `【GM名】${gamemaster}`,
+          `【GM名】${gamemaster || '未設定'}`,
+          `【作成者】<@${interaction.user.id}>`,
           `【部屋】<#${privateChannelId}> （${modeLabel}）`,
           `ID:\`${ev.id}\``
         ].join('\n'));
@@ -953,7 +963,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             `【日付】${isoUTC ? DateTime.fromISO(isoUTC).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') + ' (JST)' : '未設定'}`,
             `【シナリオ名】${scenario}`,
             `【システム名】${system || '未設定'}`,
-            `【GM名】${gamemaster}`,
+            `【GM名】${gamemaster || '未設定'}`,
+            `【作成者】<@${interaction.user.id}>`,
             `【部屋】<#${privateChannelId}>`,
             `【部屋タイプ】${modeLabel}`,
             `ID:\`${ev.id}\``
@@ -978,6 +989,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const dtText   = interaction.fields.getTextInputValue('ui_dt')?.trim() ?? '';
         const scenario = interaction.fields.getTextInputValue('ui_scenario')?.trim() ?? '';
         const system   = interaction.fields.getTextInputValue('ui_system')?.trim() ?? '';
+        const gamemaster = interaction.fields.getTextInputValue('ui_gamemaster')?.trim() ?? '';
 
         if (!scenario) {
           await interaction.reply({ content: '⛔ シナリオ名は空にできません。', ephemeral: true });
@@ -1002,10 +1014,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        ev.datetimeUTC = dtText ? isoUTC : null;   // 空なら日付クリア
-        ev.scenarioName = scenario;                // 必須
-        ev.systemName = system ? system : null;    // 空ならクリア
-        ev.gamemasterName = gamemaster ? gamemaster : null;
+        ev.datetimeUTC = dtText ? isoUTC : null;       // 空なら日付クリア
+        ev.scenarioName = scenario;                    // 必須
+        ev.systemName = system ? system : null;        // 空ならクリア
+        ev.gamemasterName = gamemaster ? gamemaster : null; // GM名を更新
         saveEvents(events);
 
         // 掲示板更新
@@ -1017,7 +1029,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             `【日付】${ev.datetimeUTC ? DateTime.fromISO(ev.datetimeUTC).setZone(ZONE).toFormat('yyyy-LL-dd HH:mm') + ' (JST)' : '未設定'}`,
             `【シナリオ名】${ev.scenarioName}`,
             `【システム名】${ev.systemName ?? '未設定'}`,
-            `【GM名】${ev.gamemasterName}`,
+            `【GM名】${ev.gamemasterName ?? '未設定'}`,
             `ID:\`${ev.id}\``
           ].join('\n'),
           ephemeral: true
