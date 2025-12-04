@@ -5,7 +5,7 @@ export const command = {
     .setName('rolebutton')
     .setDescription('ロールの付け外しボタンを投稿します')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
-    .setDMPermission(false)
+    .setDMPermission(true)
     .addRoleOption(o => o
       .setName('role')
       .setDescription('付け外しを許可するロール')
