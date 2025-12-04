@@ -1,7 +1,7 @@
 // scripts/deploy-commands.js
 import 'dotenv/config';
 import { REST, Routes } from 'discord.js';
-import { readdirSync } from 'fs';
+import { readdirSync, existsSync } from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, join } from 'path';
 
@@ -21,10 +21,15 @@ if (!TOKEN || !CLIENT_ID) {
   process.exit(1);
 }
 
-// ルート直下の commands/ を参照
-const commandsDir = join(__dirname, '..', 'src', 'commands');
-const commandFiles = readdirSync(commandsDir).filter(f => f.endsWith('.js'));
-
+// src/commands と リポジトリ直下/commands の両対応（index.js と同じ探索順）
+const commandDirCandidates = [
+  join(__dirname, '..', 'src', 'commands'),
+  join(__dirname, '..', 'commands'),
+];
+const commandsDir = commandDirCandidates.find(p => existsSync(p));
+if (!commandsDir) {
+  throw new Error(`commands ディレクトリが見つかりません。試行: ${commandDirCandidates.join(' , ')}`);
+}
 const commands = [];
 for (const file of commandFiles) {
   const fileUrl = pathToFileURL(join(commandsDir, file)).href;
