@@ -44,7 +44,7 @@ export const command = {
 
     const row = new ActionRowBuilder().addComponents(button);
     await channel.send({
-      content: `🎚️ <&${role.id}> を自分で付け外しできます。ボタンを押して切り替えてください。`,
+      content: `🎚️ ${role.name} を自分で付け外しできます。ボタンを押して切り替えてください。`,
       components: [row]
     });
 
