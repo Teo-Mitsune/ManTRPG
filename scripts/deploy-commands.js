@@ -2,65 +2,96 @@
 import 'dotenv/config';
 import { REST, Routes } from 'discord.js';
 import { readdirSync, existsSync } from 'fs';
-import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, join } from 'path';
-
-if (!process.env.DATABASE_URL) {
-  process.env.DATABASE_URL = 'dummy-for-command-deploy';
-}
+import { fileURLToPath, pathToFileURL } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
-const GUILD_ID = process.env.DISCORD_GUILD_ID;
+// ---- 環境変数 ----
+const TOKEN =
+  process.env.DISCORD_TOKEN ||
+  process.env.BOT_TOKEN;
+const CLIENT_ID =
+  process.env.DISCORD_CLIENT_ID ||
+  process.env.APPLICATION_ID ||
+  process.env.CLIENT_ID;
+const GUILD_ID =
+  process.env.DISCORD_GUILD_ID ||
+  process.env.GUILD_ID;
 
-if (!TOKEN || !CLIENT_ID) {
-  console.error('❌ DISCORD_TOKEN または DISCORD_CLIENT_ID が .env に設定されていません。');
+if (!TOKEN) {
+  console.error('❌ DISCORD_TOKEN (BOT トークン) が .env に設定されていません。');
+  process.exit(1);
+}
+if (!CLIENT_ID) {
+  console.error('❌ DISCORD_CLIENT_ID / APPLICATION_ID / CLIENT_ID のいずれも設定されていません。');
+  process.exit(1);
+}
+if (!GUILD_ID) {
+  console.error('❌ DISCORD_GUILD_ID / GUILD_ID のいずれも設定されていません。');
   process.exit(1);
 }
 
-// src/commands と リポジトリ直下/commands の両対応（index.js と同じ探索順）
+// ---- commands ディレクトリの探索 ----
 const commandDirCandidates = [
-  join(__dirname, '..', 'src', 'commands'),
-  join(__dirname, '..', 'commands'),
+  join(__dirname, '..', 'src', 'commands'), // /workspace/src/commands
+  join(__dirname, '..', 'commands'),        // /workspace/commands
 ];
-const commandsDir = commandDirCandidates.find(p => existsSync(p));
-if (!commandsDir) {
-  throw new Error(`commands ディレクトリが見つかりません。試行: ${commandDirCandidates.join(' , ')}`);
+
+const commandsPath = commandDirCandidates.find(p => existsSync(p));
+if (!commandsPath) {
+  console.error('❌ commands ディレクトリが見つかりません。試行したパス:');
+  for (const p of commandDirCandidates) console.error(' -', p);
+  process.exit(1);
 }
+
+console.log('📂 commands ディレクトリ:', commandsPath);
+
+// ---- Slash コマンド定義を読み込み ----
 const commands = [];
-for (const file of commandFiles) {
-  const fileUrl = pathToFileURL(join(commandsDir, file)).href;
-  const { command } = await import(fileUrl);
+
+const files = readdirSync(commandsPath).filter(f => f.endsWith('.js'));
+if (files.length === 0) {
+  console.warn('⚠️ .js コマンドファイルが 0 件です。何も登録されません。');
+}
+
+for (const file of files) {
+  const fileUrl = pathToFileURL(join(commandsPath, file)).href;
+  console.log('  ↳ 読み込み中:', file);
+
+  const imported = await import(fileUrl).catch((e) => {
+    console.error('  ❌ import 失敗:', file, e);
+    return null;
+  });
+  if (!imported) continue;
+
+  const command = imported.command ?? imported.default;
   if (!command?.data?.toJSON) {
-    console.warn(`⚠️ スキップ: ${file} は { command: { data, execute } } 形式ではありません。`);
+    console.warn('  ⚠️ command.data.toJSON がありません。スキップ:', file);
     continue;
   }
+
   commands.push(command.data.toJSON());
 }
 
-console.log(`📝 登録対象コマンド: ${commands.map(c => c.name).join(', ') || '(なし)'}`);
+console.log(`✅ 読み込んだコマンド数: ${commands.length}`);
 
+// ---- Discord へ登録 ----
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 try {
-  if (GUILD_ID) {
-    const data = await rest.put(
-      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-      { body: commands }
-    );
-    console.log(`✅ ギルド(${GUILD_ID}) に ${data.length} 件を登録しました。`);
-  } else {
-    const data = await rest.put(
-      Routes.applicationCommands(CLIENT_ID),
-      { body: commands }
-    );
-    console.log(`✅ グローバルに ${data.length} 件を登録しました。`);
-    console.log('⏳ 反映には数分かかることがあります。');
-  }
-} catch (err) {
-  console.error('❌ 登録エラー:', err);
+  console.log(
+    `🚀 Discord へ Slash コマンドをデプロイします (guild: ${GUILD_ID})...`
+  );
+
+  const data = await rest.put(
+    Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+    { body: commands },
+  );
+
+  console.log(`🎉 完了: ${Array.isArray(data) ? data.length : 0} 件のコマンドを登録しました。`);
+} catch (error) {
+  console.error('❌ デプロイ中にエラーが発生しました:', error);
   process.exit(1);
 }
