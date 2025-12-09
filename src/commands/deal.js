@@ -77,7 +77,7 @@ export const command = {
         try {
           await user.send({
             content: [
-              '🐺 **ワードウルフ：あなたは少数派です**',
+              '**ワードウルフ：あなたに単語をプレゼント**',
               '',
               `【あなたのワード】${minorityText}`
             ].join('\n')
@@ -90,7 +90,7 @@ export const command = {
         try {
           await user.send({
             content: [
-              '🐑 **ワードウルフ：あなたは多数派です**',
+              ' **ワードウルフ：あなたに単語をプレゼント**',
               '',
               `【あなたのワード】${majorityText}`
             ].join('\n')
