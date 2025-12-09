@@ -4,34 +4,35 @@ import { SlashCommandBuilder } from 'discord.js';
 export const command = {
   data: new SlashCommandBuilder()
     .setName('deal')
-    .setDescription('アイテムを複数人に“完全に秘密裏”で配布します（配布者も中身は見えません）')
-    .addUserOption(opt =>
-      opt.setName('user1').setDescription('配布先 1人目').setRequired(true)
+    .setDescription('アイテム配布 or ワードウルフ配布（完全非公開）')
+
+    // 配布先ユーザー
+    .addUserOption(opt => opt.setName('user1').setDescription('配布先 1人目').setRequired(true))
+    .addUserOption(opt => opt.setName('user2').setDescription('配布先 2人目').setRequired(false))
+    .addUserOption(opt => opt.setName('user3').setDescription('配布先 3人目').setRequired(false))
+    .addUserOption(opt => opt.setName('user4').setDescription('配布先 4人目').setRequired(false))
+    .addUserOption(opt => opt.setName('user5').setDescription('配布先 5人目').setRequired(false))
+
+    // 通常配布用
+    .addStringOption(opt =>
+      opt.setName('items').setDescription('配布するアイテム（カンマ区切り）').setRequired(false)
     )
-    .addUserOption(opt =>
-      opt.setName('user2').setDescription('配布先 2人目').setRequired(false)
-    )
-    .addUserOption(opt =>
-      opt.setName('user3').setDescription('配布先 3人目').setRequired(false)
-    )
-    .addUserOption(opt =>
-      opt.setName('user4').setDescription('配布先 4人目').setRequired(false)
-    )
-    .addUserOption(opt =>
-      opt.setName('user5').setDescription('配布先 5人目').setRequired(false)
+
+    // ワードウルフ用
+    .addBooleanOption(opt =>
+      opt.setName('wordwolf').setDescription('ワードウルフモードをONにする').setRequired(false)
     )
     .addStringOption(opt =>
-      opt
-        .setName('items')
-        .setDescription('配布するアイテム（カンマ区切り）')
-        .setRequired(true)
+      opt.setName('text1').setDescription('ワードウルフ用 テキスト1').setRequired(false)
+    )
+    .addStringOption(opt =>
+      opt.setName('text2').setDescription('ワードウルフ用 テキスト2').setRequired(false)
     ),
 
   async execute(interaction) {
-    // ✅ 「アプリケーションが応答しません」完全防止
     await interaction.deferReply({ ephemeral: true });
 
-    // 配布先ユーザー一覧
+    // ユーザー収集
     const users = [
       interaction.options.getUser('user1'),
       interaction.options.getUser('user2'),
@@ -40,14 +41,89 @@ export const command = {
       interaction.options.getUser('user5'),
     ].filter(Boolean);
 
-    // アイテム一覧（順番対応）
-    const rawItems = interaction.options.getString('items');
-    const items = rawItems.split(',').map(s => s.trim()).filter(Boolean);
+    const isWordWolf = interaction.options.getBoolean('wordwolf') ?? false;
 
-    if (items.length === 0) {
-      await interaction.editReply('⛔ アイテムが1つも指定されていません。');
+    // -----------------------------
+    // 🐺 ワードウルフモード
+    // -----------------------------
+    if (isWordWolf) {
+      const text1 = interaction.options.getString('text1');
+      const text2 = interaction.options.getString('text2');
+
+      if (!text1 || !text2) {
+        await interaction.editReply('⛔ ワードウルフモードでは text1 と text2 の両方が必要です。');
+        return;
+      }
+
+      const total = users.length;
+
+      // ✅ 少数派人数ルール（要望どおり）
+      const minorityCount = total >= 5 ? 2 : 1;
+
+      // ✅ どちらが少数派かランダム
+      const minorityText = Math.random() < 0.5 ? text1 : text2;
+      const majorityText = minorityText === text1 ? text2 : text1;
+
+      // ✅ ユーザーシャッフル
+      const shuffled = [...users].sort(() => Math.random() - 0.5);
+
+      const minorityUsers = shuffled.slice(0, minorityCount);
+      const majorityUsers = shuffled.slice(minorityCount);
+
+      // ✅ DM送信
+      let successCount = 0;
+
+      for (const user of minorityUsers) {
+        try {
+          await user.send({
+            content: [
+              '🐺 **ワードウルフ：あなたは少数派です**',
+              '',
+              `【あなたのワード】${minorityText}`
+            ].join('\n')
+          });
+          successCount++;
+        } catch {}
+      }
+
+      for (const user of majorityUsers) {
+        try {
+          await user.send({
+            content: [
+              '🐑 **ワードウルフ：あなたは多数派です**',
+              '',
+              `【あなたのワード】${majorityText}`
+            ].join('\n')
+          });
+          successCount++;
+        } catch {}
+      }
+
+      // ✅ 配布者には「結果の事実だけ」
+      await interaction.editReply({
+        content: [
+          '✅ **ワードウルフ配布が完了しました（完全非公開）**',
+          '',
+          `👥 参加人数: ${total}人`,
+          `🐺 少数派: ${minorityCount}人`,
+          `📮 DM送信成功: ${successCount}人`,
+          '',
+          '※誰が少数派か、どのワードが少数派かは**配布者にも表示されません**。'
+        ].join('\n')
+      });
       return;
     }
+
+    // -----------------------------
+    // 🎁 通常アイテム配布モード
+    // -----------------------------
+    const rawItems = interaction.options.getString('items');
+    if (!rawItems) {
+      await interaction.editReply('⛔ 通常配布では items が必須です。');
+      return;
+    }
+
+    const items = rawItems.split(',').map(s => s.trim()).filter(Boolean);
 
     if (users.length > items.length) {
       await interaction.editReply(
@@ -56,7 +132,6 @@ export const command = {
       return;
     }
 
-    // ✅ 完全秘匿DM配布（誰にも内容は漏れない）
     let successCount = 0;
 
     for (let i = 0; i < users.length; i++) {
@@ -72,12 +147,9 @@ export const command = {
           ].join('\n')
         });
         successCount++;
-      } catch {
-        // DM失敗はカウントしないが、配布者にも詳細は見せない
-      }
+      } catch {}
     }
 
-    // ✅ 配布者には「完了した事実だけ」を通知（中身は完全に伏せる）
     await interaction.editReply({
       content: [
         '✅ **アイテム配布が完了しました**',
